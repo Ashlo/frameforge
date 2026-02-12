@@ -109,10 +109,8 @@ export default function Page() {
                   </div>
 
                   <label htmlFor="formatSelect">Format</label>
-                  <select id="formatSelect" defaultValue="auto">
-                    <option value="auto">Auto (Recommended)</option>
-                    <option value="mp4">MP4 (if supported)</option>
-                    <option value="webm">WebM</option>
+                  <select id="formatSelect" defaultValue="mkv">
+                    <option value="mkv">MKV (Forced)</option>
                   </select>
                 </section>
 

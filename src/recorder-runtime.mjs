@@ -60,7 +60,7 @@ const state = {
   writingToDisk: false,
   bytesWritten: 0,
   diskWriteError: null,
-  activeExtension: "webm",
+  activeExtension: "mkv",
   activeMimeType: "",
   userRequestedStop: false,
   lastRecorderError: "",
@@ -528,34 +528,19 @@ function stopDrawLoop() {
 }
 
 function getRecordingProfile() {
-  const pref = formatSelect.value;
-  const webmCandidates = [
-    { mimeType: "video/webm;codecs=vp9,opus", extension: "webm", label: "WebM (VP9)" },
-    { mimeType: "video/webm;codecs=vp8,opus", extension: "webm", label: "WebM (VP8)" },
-    { mimeType: "video/webm", extension: "webm", label: "WebM" },
+  // Browsers do not expose native MKV recording via MediaRecorder.
+  // We use a WebM-compatible stream and force MKV file export for user workflow consistency.
+  const candidates = [
+    { mimeType: "video/webm;codecs=vp9,opus", extension: "mkv", label: "MKV (VP9/Opus)" },
+    { mimeType: "video/webm;codecs=vp8,opus", extension: "mkv", label: "MKV (VP8/Opus)" },
+    { mimeType: "video/webm", extension: "mkv", label: "MKV (WebM-compatible)" },
   ];
-  const mp4Candidates = [
-    { mimeType: "video/mp4;codecs=avc1.42E01E,mp4a.40.2", extension: "mp4", label: "MP4 (H.264/AAC)" },
-    { mimeType: "video/mp4", extension: "mp4", label: "MP4" },
-  ];
-
-  let candidates = webmCandidates;
-  if (pref === "mp4") {
-    candidates = mp4Candidates;
-  } else if (pref === "auto") {
-    candidates = [...webmCandidates, ...mp4Candidates];
-  }
 
   const supported = candidates.find((item) => MediaRecorder.isTypeSupported(item.mimeType));
-  if (supported) {
-    return supported;
+  if (!supported) {
+    throw new Error("MKV recording is not supported in this browser.");
   }
-
-  return {
-    mimeType: "",
-    extension: pref === "mp4" ? "mp4" : "webm",
-    label: "Browser Default",
-  };
+  return supported;
 }
 
 function buildSuggestedFilename(extension) {
@@ -900,11 +885,7 @@ async function startRecording() {
     if (!state.activeMimeType && state.mediaRecorder.mimeType) {
       state.activeMimeType = state.mediaRecorder.mimeType;
     }
-    if (state.activeMimeType.includes("mp4")) {
-      state.activeExtension = "mp4";
-    } else if (state.activeMimeType.includes("webm")) {
-      state.activeExtension = "webm";
-    }
+    state.activeExtension = "mkv";
 
     state.mediaRecorder.addEventListener("error", (event) => {
       const msg = event.error?.message || "recorder error";
