@@ -32,7 +32,7 @@ export default function Page() {
           </div>
 
           <aside className="controls">
-            <div className="control-card">
+            <div className="control-card flow-card">
               <h2>Record Flow</h2>
               <p className="panel-label">Capture System</p>
               <div className="button-grid">
@@ -43,6 +43,9 @@ export default function Page() {
                   Stop Sources
                 </button>
               </div>
+              <p id="captureHint" className="capture-hint" data-tone="idle">
+                Ready to request screen, camera, and microphone permissions.
+              </p>
               <button id="replaceScreenBtn" className="btn btn-secondary">
                 Replace Screen
               </button>
@@ -61,7 +64,7 @@ export default function Page() {
               </a>
             </div>
 
-            <div className="control-card">
+            <div className="control-card telemetry-card">
               <h2>Telemetry</h2>
               <div className="status-grid">
                 <p className="status-pill">
@@ -83,7 +86,73 @@ export default function Page() {
               </div>
             </div>
 
-            <div className="control-card settings-section rig-hub">
+            <div className="control-card demo-card spotlight-card">
+              <h2>Product Demos</h2>
+              <p className="panel-label">Auto Focus Engine</p>
+
+              <label className="inline-toggle">
+                <input id="demoModeToggle" type="checkbox" defaultChecked />
+                Enable Demo Mode
+              </label>
+
+              <div className="button-grid">
+                <button id="connectExtensionBtn" className="btn btn-secondary">
+                  Connect Input Source
+                </button>
+                <button id="demoResetBtn" className="btn">
+                  Reset Demo
+                </button>
+              </div>
+
+              <p className="demo-status" data-state="idle">
+                <span className="status-label">Demo Status</span>
+                <span id="demoStatus">disconnected</span>
+              </p>
+
+              <label htmlFor="demoPresetSelect">Style Preset</label>
+              <select id="demoPresetSelect" defaultValue="subtle">
+                <option value="subtle">Subtle Focus</option>
+                <option value="balanced">Balanced</option>
+                <option value="intense">Intense</option>
+                <option value="custom">Custom</option>
+              </select>
+
+              <label className="inline-toggle">
+                <input id="demoTriggerClickToggle" type="checkbox" defaultChecked />
+                Click Trigger
+              </label>
+
+              <label className="inline-toggle">
+                <input id="demoTriggerTypeToggle" type="checkbox" defaultChecked />
+                Typing Trigger
+              </label>
+
+              <div className="slider-line">
+                <label htmlFor="demoZoomStrengthRange">Zoom Strength</label>
+                <input id="demoZoomStrengthRange" type="range" min="5" max="80" defaultValue="24" />
+                <output id="demoZoomStrengthValue">24%</output>
+              </div>
+
+              <div className="slider-line">
+                <label htmlFor="demoZoomDurationRange">Zoom Duration</label>
+                <input id="demoZoomDurationRange" type="range" min="200" max="2000" defaultValue="700" />
+                <output id="demoZoomDurationValue">700ms</output>
+              </div>
+
+              <div className="slider-line">
+                <label htmlFor="demoCooldownRange">Cooldown</label>
+                <input id="demoCooldownRange" type="range" min="0" max="3000" defaultValue="650" />
+                <output id="demoCooldownValue">650ms</output>
+              </div>
+
+              <div className="slider-line">
+                <label htmlFor="demoTypingHoldRange">Typing Hold</label>
+                <input id="demoTypingHoldRange" type="range" min="200" max="3000" defaultValue="1200" />
+                <output id="demoTypingHoldValue">1200ms</output>
+              </div>
+            </div>
+
+            <div className="control-card settings-section rig-hub rig-card">
               <h2>Rig Console</h2>
               <div className="rig-grid">
                 <section className="rig-block">
@@ -127,6 +196,11 @@ export default function Page() {
                     <option value="rounded">Rounded Rectangle</option>
                     <option value="circle">Circle</option>
                   </select>
+
+                  <label className="inline-toggle">
+                    <input id="cameraEnabledToggle" type="checkbox" defaultChecked />
+                    Camera On
+                  </label>
 
                   <label className="inline-toggle">
                     <input id="mirrorToggle" type="checkbox" defaultChecked />

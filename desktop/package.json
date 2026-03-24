@@ -1,0 +1,14 @@
+{
+  "name": "frameforge-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Frameforge desktop shell (Tauri)",
+  "scripts": {
+    "dev": "CARGO_HOME=../.cargo-home npx --yes @tauri-apps/cli@^1 dev --config src-tauri/tauri.conf.json",
+    "build": "CARGO_HOME=../.cargo-home npx --yes @tauri-apps/cli@^1 build --config src-tauri/tauri.conf.json",
+    "tauri": "CARGO_HOME=../.cargo-home npx --yes @tauri-apps/cli@^1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.6.0"
+  }
+}

@@ -1,7 +1,10 @@
 node_modules
+desktop/node_modules
 .next
 out
 dist
+desktop/src-tauri/target
+.cargo-home
 .DS_Store
 .npm-cache
 npm-debug.log*

@@ -4,6 +4,17 @@ import {
   getBaseScreenRect,
   getScreenRenderMode,
 } from "./recorder-utils.mjs";
+import {
+  DEFAULT_DEMO_PRESET,
+  applyPreset,
+  beginDemoZoom,
+  enqueueDemoEvent,
+  getDemoScreenEffect,
+  normalizeDemoEvent,
+  stepDemoZoom,
+} from "./demo-engine.mjs";
+import { createDemoBridge } from "./demo-bridge.mjs";
+import { createDesktopDemoBridge, isDesktopRuntime } from "./desktop-demo-bridge.mjs";
 
 const canvas = document.getElementById("compositeCanvas");
 const ctx = canvas.getContext("2d");
@@ -17,6 +28,7 @@ const replaceScreenBtn = document.getElementById("replaceScreenBtn");
 const startRecordBtn = document.getElementById("startRecordBtn");
 const stopRecordBtn = document.getElementById("stopRecordBtn");
 const downloadLink = document.getElementById("downloadLink");
+const captureHint = document.getElementById("captureHint");
 const togglePanelBtn = document.getElementById("togglePanelBtn");
 const workspace = document.querySelector(".workspace");
 
@@ -33,18 +45,39 @@ const screenYValue = document.getElementById("screenYValue");
 const resetScreenBtn = document.getElementById("resetScreenBtn");
 const webcamSizeRange = document.getElementById("webcamSizeRange");
 const webcamShapeSelect = document.getElementById("webcamShapeSelect");
+const cameraEnabledToggle = document.getElementById("cameraEnabledToggle");
 const mirrorToggle = document.getElementById("mirrorToggle");
 const webcamSizeValue = document.getElementById("webcamSizeValue");
 const resetWebcamBtn = document.getElementById("resetWebcamBtn");
+const demoModeToggle = document.getElementById("demoModeToggle");
+const connectExtensionBtn = document.getElementById("connectExtensionBtn");
+const demoResetBtn = document.getElementById("demoResetBtn");
+const demoStatus = document.getElementById("demoStatus");
+const demoPresetSelect = document.getElementById("demoPresetSelect");
+const demoTriggerClickToggle = document.getElementById("demoTriggerClickToggle");
+const demoTriggerTypeToggle = document.getElementById("demoTriggerTypeToggle");
+const demoZoomStrengthRange = document.getElementById("demoZoomStrengthRange");
+const demoZoomDurationRange = document.getElementById("demoZoomDurationRange");
+const demoCooldownRange = document.getElementById("demoCooldownRange");
+const demoTypingHoldRange = document.getElementById("demoTypingHoldRange");
+const demoZoomStrengthValue = document.getElementById("demoZoomStrengthValue");
+const demoZoomDurationValue = document.getElementById("demoZoomDurationValue");
+const demoCooldownValue = document.getElementById("demoCooldownValue");
+const demoTypingHoldValue = document.getElementById("demoTypingHoldValue");
 
 const sourcesStatus = document.getElementById("sourcesStatus");
 const recordingStatus = document.getElementById("recordingStatus");
 const elapsedTime = document.getElementById("elapsedTime");
 const recordingStartTime = document.getElementById("recordingStartTime");
 
+const initialDemoPreset = applyPreset(DEFAULT_DEMO_PRESET);
+const platformMode = isDesktopRuntime() ? "desktop" : "web";
+
 const state = {
+  platformMode,
   screenStream: null,
   webcamStream: null,
+  screenSurfaceType: "unknown",
   mediaRecorder: null,
   recordedChunks: [],
   drawFrameId: 0,
@@ -84,6 +117,41 @@ const state = {
     width: 360,
     height: 202,
   },
+  webcamEnabled: true,
+  demo: {
+    enabled: true,
+    triggerClick: true,
+    triggerType: true,
+    preset: initialDemoPreset.preset,
+    zoomStrength: initialDemoPreset.zoomStrength,
+    zoomDurationMs: initialDemoPreset.zoomDurationMs,
+    cooldownMs: initialDemoPreset.cooldownMs,
+    typingHoldMs: initialDemoPreset.typingHoldMs,
+  },
+  demoTelemetry: {
+    connected: false,
+    sourceTabArmed: false,
+    sourceTabId: null,
+    sourceTabTitle: "",
+    lastEventAt: 0,
+    lastBridgeError: "",
+  },
+  demoZoom: {
+    active: false,
+    stage: "idle",
+    startedAt: 0,
+    zoomInEndsAt: 0,
+    holdEndsAt: 0,
+    zoomOutEndsAt: 0,
+    cooldownUntil: 0,
+    scaleCurrent: 1,
+    scaleTarget: 1,
+    focusNormX: 0.5,
+    focusNormY: 0.5,
+    kind: "click",
+  },
+  demoQueue: [],
+  demoBridge: null,
   drag: {
     active: false,
     mode: "none",
@@ -94,6 +162,7 @@ const state = {
     startY: 0,
     startWidth: 0,
   },
+  sourceAction: "idle",
 };
 
 const WEBCAM_ASPECT = 16 / 9;
@@ -147,15 +216,106 @@ function refreshControlState() {
   const hasAnySource = hasLiveSource(state.screenStream) || hasLiveSource(state.webcamStream);
   const recording = isRecordingActive();
   const controls = deriveControlState({ hasScreen, hasWebcam, hasAnySource, recording });
+  const sourceBusy = state.sourceAction !== "idle";
 
-  startSourcesBtn.disabled = controls.startSourcesDisabled;
-  stopSourcesBtn.disabled = controls.stopSourcesDisabled;
-  replaceScreenBtn.disabled = controls.replaceScreenDisabled;
+  startSourcesBtn.disabled = sourceBusy || controls.startSourcesDisabled;
+  stopSourcesBtn.disabled = sourceBusy || controls.stopSourcesDisabled;
+  replaceScreenBtn.disabled = sourceBusy || controls.replaceScreenDisabled;
   startRecordBtn.disabled = controls.startRecordDisabled;
   stopRecordBtn.disabled = controls.stopRecordDisabled;
   resolutionSelect.disabled = controls.resolutionDisabled;
   fpsSelect.disabled = controls.fpsDisabled;
   formatSelect.disabled = controls.formatDisabled;
+}
+
+function setCaptureHint(message, tone = "idle") {
+  if (!captureHint) {
+    return;
+  }
+  captureHint.textContent = message;
+  captureHint.dataset.tone = tone;
+}
+
+function setSourceAction(action) {
+  state.sourceAction = action;
+  if (action === "starting") {
+    startSourcesBtn.textContent = "Requesting...";
+    replaceScreenBtn.textContent = "Replace Screen";
+  } else if (action === "replacing") {
+    startSourcesBtn.textContent = "Start Sources";
+    replaceScreenBtn.textContent = "Selecting...";
+  } else {
+    startSourcesBtn.textContent = "Start Sources";
+    replaceScreenBtn.textContent = "Replace Screen";
+  }
+  refreshControlState();
+}
+
+function describeCaptureError(error, mode = "start") {
+  if (!(error instanceof DOMException)) {
+    return error instanceof Error ? error.message : `Failed to ${mode} sources.`;
+  }
+
+  if (error.name === "AbortError") {
+    return mode === "replace" ? "Screen selection canceled." : "Capture selection canceled.";
+  }
+
+  if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+    if (state.platformMode === "desktop") {
+      return "Permission denied. Enable Screen Recording, Camera, and Microphone for Frameforge Desktop in macOS System Settings > Privacy & Security, then retry.";
+    }
+    return "Permission denied. Allow screen, camera, and microphone access in your browser and retry.";
+  }
+
+  if (error.name === "NotReadableError") {
+    return "Capture device is busy or unavailable. Close other capture apps and retry.";
+  }
+
+  if (error.name === "InvalidStateError") {
+    return "Capture request must be triggered by a direct user action. Click the button again in the active window.";
+  }
+
+  return error.message || `Failed to ${mode} sources.`;
+}
+
+function assertCaptureApisAvailable() {
+  const missing = [];
+  const mediaDevices = navigator.mediaDevices;
+  if (!mediaDevices) {
+    missing.push("mediaDevices");
+  } else {
+    if (typeof mediaDevices.getDisplayMedia !== "function") {
+      missing.push("getDisplayMedia");
+    }
+    if (typeof mediaDevices.getUserMedia !== "function") {
+      missing.push("getUserMedia");
+    }
+  }
+
+  if (missing.length === 0) {
+    return;
+  }
+
+  const missingList = missing.join(", ");
+  if (state.platformMode === "desktop") {
+    throw new Error(
+      `Desktop capture API unavailable (${missingList}). On macOS, relaunch Frameforge Desktop after enabling Screen Recording, Camera, and Microphone permissions in System Settings > Privacy & Security.`
+    );
+  }
+
+  throw new Error(`This browser does not expose required capture APIs (${missingList}).`);
+}
+
+function assertDisplayCaptureApiAvailable() {
+  if (typeof navigator.mediaDevices?.getDisplayMedia === "function") {
+    return;
+  }
+  if (state.platformMode === "desktop") {
+    throw new Error(
+      "Desktop screen capture API unavailable (getDisplayMedia). Relaunch the desktop app after granting Screen Recording permission in macOS System Settings > Privacy & Security."
+    );
+  }
+  throw new Error("This browser does not expose getDisplayMedia.");
 }
 
 async function acquireWakeLock() {
@@ -201,6 +361,10 @@ function updateSliderReadouts() {
   screenXValue.textContent = `${screenXRange.value}%`;
   screenYValue.textContent = `${screenYRange.value}%`;
   webcamSizeValue.textContent = `${webcamSizeRange.value}%`;
+  demoZoomStrengthValue.textContent = `${demoZoomStrengthRange.value}%`;
+  demoZoomDurationValue.textContent = `${demoZoomDurationRange.value}ms`;
+  demoCooldownValue.textContent = `${demoCooldownRange.value}ms`;
+  demoTypingHoldValue.textContent = `${demoTypingHoldRange.value}ms`;
 }
 
 function updateScreenTransformFromUi() {
@@ -209,6 +373,288 @@ function updateScreenTransformFromUi() {
   state.screenTransform.offsetX = Number.parseInt(screenXRange.value, 10) / 100;
   state.screenTransform.offsetY = Number.parseInt(screenYRange.value, 10) / 100;
   updateSliderReadouts();
+}
+
+function setDemoStatus(text, tone = "idle") {
+  demoStatus.textContent = text;
+  const statusEl = demoStatus.closest(".demo-status");
+  if (statusEl) {
+    statusEl.dataset.state = tone;
+  }
+}
+
+function getScreenSurfaceType(stream) {
+  const track = stream?.getVideoTracks?.()[0];
+  if (!track || typeof track.getSettings !== "function") {
+    return "unknown";
+  }
+  const settings = track.getSettings();
+  return settings.displaySurface || "unknown";
+}
+
+function isDemoSourceSupported() {
+  if (state.platformMode === "desktop") {
+    return true;
+  }
+  return state.screenSurfaceType === "browser";
+}
+
+function clearDemoQueue() {
+  state.demoQueue.length = 0;
+}
+
+function resetDemoZoomState({ keepCooldown = false } = {}) {
+  const cooldownUntil = keepCooldown ? state.demoZoom.cooldownUntil : 0;
+  state.demoZoom = {
+    active: false,
+    stage: "idle",
+    startedAt: 0,
+    zoomInEndsAt: 0,
+    holdEndsAt: 0,
+    zoomOutEndsAt: 0,
+    cooldownUntil,
+    scaleCurrent: 1,
+    scaleTarget: 1,
+    focusNormX: state.demoZoom.focusNormX || 0.5,
+    focusNormY: state.demoZoom.focusNormY || 0.5,
+    kind: "click",
+  };
+}
+
+function setDemoPresetInUi(presetName) {
+  const preset = applyPreset(presetName);
+  demoPresetSelect.value = preset.preset;
+  demoZoomStrengthRange.value = String(Math.round(preset.zoomStrength * 100));
+  demoZoomDurationRange.value = String(preset.zoomDurationMs);
+  demoCooldownRange.value = String(preset.cooldownMs);
+  demoTypingHoldRange.value = String(preset.typingHoldMs);
+  updateSliderReadouts();
+}
+
+function updateDemoSettingsFromUi({ markCustom = false } = {}) {
+  if (markCustom && demoPresetSelect.value !== "custom") {
+    demoPresetSelect.value = "custom";
+  }
+
+  state.demo.enabled = demoModeToggle.checked;
+  state.demo.triggerClick = demoTriggerClickToggle.checked;
+  state.demo.triggerType = demoTriggerTypeToggle.checked;
+  state.demo.preset = demoPresetSelect.value;
+  state.demo.zoomStrength = clampNumber(Number.parseInt(demoZoomStrengthRange.value, 10) / 100, 0.05, 0.9);
+  state.demo.zoomDurationMs = clampNumber(Number.parseInt(demoZoomDurationRange.value, 10), 200, 4000);
+  state.demo.cooldownMs = clampNumber(Number.parseInt(demoCooldownRange.value, 10), 0, 5000);
+  state.demo.typingHoldMs = clampNumber(Number.parseInt(demoTypingHoldRange.value, 10), 200, 5000);
+  updateSliderReadouts();
+
+  if (!state.demo.enabled) {
+    clearDemoQueue();
+    resetDemoZoomState();
+  }
+}
+
+function syncDemoConfigToBridge() {
+  if (state.platformMode !== "desktop" || !state.demoBridge || typeof state.demoBridge.setConfig !== "function") {
+    return;
+  }
+
+  state.demoBridge
+    .setConfig({
+      zoomStrength: state.demo.zoomStrength,
+      zoomDurationMs: state.demo.zoomDurationMs,
+      cooldownMs: state.demo.cooldownMs,
+      typingHoldMs: state.demo.typingHoldMs,
+      clickEnabled: state.demo.triggerClick,
+      typeEnabled: state.demo.triggerType,
+      screenWidth: window.screen?.width || 1920,
+      screenHeight: window.screen?.height || 1080,
+    })
+    .catch((error) => {
+      state.demoTelemetry.lastBridgeError = error instanceof Error ? error.message : "desktop bridge config failed";
+      refreshDemoStatus();
+    });
+}
+
+function resetDemoControls() {
+  demoModeToggle.checked = true;
+  demoTriggerClickToggle.checked = true;
+  demoTriggerTypeToggle.checked = true;
+  setDemoPresetInUi(DEFAULT_DEMO_PRESET);
+  updateDemoSettingsFromUi();
+  clearDemoQueue();
+  resetDemoZoomState();
+}
+
+function handleDemoBridgeStatus(payload) {
+  state.demoTelemetry.connected = Boolean(payload.connected);
+  state.demoTelemetry.sourceTabArmed = Boolean(payload.armed);
+  state.demoTelemetry.sourceTabId = payload.sourceTabId ?? null;
+  state.demoTelemetry.sourceTabTitle = payload.sourceTabTitle || "";
+  if (payload.lastError) {
+    state.demoTelemetry.lastBridgeError = payload.lastError;
+  } else if (payload.connected) {
+    state.demoTelemetry.lastBridgeError = "";
+  }
+}
+
+function refreshDemoStatus() {
+  const sourceName =
+    state.demoTelemetry.sourceTabTitle ||
+    (state.demoTelemetry.sourceTabId ? `tab ${state.demoTelemetry.sourceTabId}` : "");
+  if (state.platformMode === "desktop") {
+    connectExtensionBtn.textContent = state.demoTelemetry.connected
+      ? "Refresh Input Monitor"
+      : "Enable Input Monitor";
+  } else {
+    connectExtensionBtn.textContent = state.demoTelemetry.connected ? "Refresh Extension Link" : "Connect Extension";
+  }
+
+  if (!state.demo.enabled) {
+    setDemoStatus("demo mode off", "idle");
+    return;
+  }
+
+  if (state.demoTelemetry.lastBridgeError) {
+    const prefix = state.platformMode === "desktop" ? "desktop monitor error" : "extension error";
+    setDemoStatus(`${prefix}: ${state.demoTelemetry.lastBridgeError}`, "error");
+    return;
+  }
+
+  if (!state.demoTelemetry.connected) {
+    if (state.platformMode === "desktop") {
+      setDemoStatus("desktop monitor off - click Enable Input Monitor", "warn");
+    } else {
+      setDemoStatus("disconnected - click Connect Extension", "warn");
+    }
+    return;
+  }
+
+  if (!state.demoTelemetry.sourceTabArmed) {
+    if (state.platformMode === "desktop") {
+      setDemoStatus("connected, monitor idle", "warn");
+    } else {
+      setDemoStatus("connected, waiting for source tab", "warn");
+    }
+    return;
+  }
+
+  if (hasLiveVideo(state.screenStream) && !isDemoSourceSupported()) {
+    setDemoStatus("unsupported source: use browser tab capture", "warn");
+    return;
+  }
+
+  if (state.demoZoom.active) {
+    setDemoStatus("auto-focus active", "ready");
+    return;
+  }
+
+  if (sourceName) {
+    if (state.platformMode === "desktop") {
+      setDemoStatus("desktop input monitor active", "ready");
+    } else {
+      setDemoStatus(`armed on ${sourceName}`, "ready");
+    }
+    return;
+  }
+
+  if (state.platformMode === "desktop") {
+    setDemoStatus("ready for global click + typing focus", "ready");
+  } else {
+    setDemoStatus("ready for click + typing focus", "ready");
+  }
+}
+
+function handleIncomingDemoEvent(rawEvent) {
+  const event = normalizeDemoEvent(rawEvent);
+  if (!event) {
+    return;
+  }
+
+  if (!state.demo.enabled || !isDemoSourceSupported()) {
+    return;
+  }
+
+  if (event.kind === "click" && !state.demo.triggerClick) {
+    return;
+  }
+  if (event.kind === "type" && !state.demo.triggerType) {
+    return;
+  }
+
+  enqueueDemoEvent(state.demoQueue, event);
+  state.demoTelemetry.lastEventAt = performance.now();
+}
+
+function updateDemoZoom(nowMs) {
+  if (!state.demo.enabled || !isDemoSourceSupported()) {
+    clearDemoQueue();
+    resetDemoZoomState({ keepCooldown: true });
+    return;
+  }
+
+  if (!state.demoZoom.active && nowMs >= state.demoZoom.cooldownUntil && state.demoQueue.length > 0) {
+    const next = state.demoQueue.shift();
+    state.demoZoom = beginDemoZoom(state.demoZoom, next, state.demo, nowMs);
+  }
+
+  state.demoZoom = stepDemoZoom(state.demoZoom, state.demo, nowMs);
+}
+
+function ensureDemoBridge() {
+  if (state.demoBridge) {
+    return state.demoBridge;
+  }
+
+  const bridgeFactory = state.platformMode === "desktop" ? createDesktopDemoBridge : createDemoBridge;
+
+  state.demoBridge = bridgeFactory({
+    onStatus: (payload) => {
+      handleDemoBridgeStatus(payload);
+      refreshDemoStatus();
+    },
+    onEvent: (payload) => {
+      handleIncomingDemoEvent(payload);
+    },
+    onError: (payload) => {
+      state.demoTelemetry.lastBridgeError = payload.message || payload.code || "bridge error";
+      refreshDemoStatus();
+    },
+  });
+  return state.demoBridge;
+}
+
+async function connectDemoBridge() {
+  connectExtensionBtn.disabled = true;
+  setDemoStatus(state.platformMode === "desktop" ? "starting desktop input monitor..." : "connecting extension...", "idle");
+  try {
+    const bridge = ensureDemoBridge();
+    await bridge.connect();
+    syncDemoConfigToBridge();
+    const status = await bridge.getStatus();
+    handleDemoBridgeStatus(status);
+  } catch (error) {
+    state.demoTelemetry.connected = false;
+    state.demoTelemetry.lastBridgeError =
+      error instanceof Error
+        ? error.message
+        : state.platformMode === "desktop"
+          ? "Desktop input monitor connection failed."
+          : "Extension bridge connection failed.";
+  } finally {
+    connectExtensionBtn.disabled = false;
+    refreshDemoStatus();
+  }
+}
+
+function destroyDemoBridge() {
+  if (state.demoBridge) {
+    if (typeof state.demoBridge.disarm === "function") {
+      state.demoBridge.disarm().catch(() => {
+        // ignore shutdown disarm errors
+      });
+    }
+    state.demoBridge.destroy();
+    state.demoBridge = null;
+  }
 }
 
 function resetDownloadLink() {
@@ -362,7 +808,7 @@ function pointInsideWebcam(point) {
 }
 
 function getWebcamPointerTarget(point) {
-  if (!hasLiveVideo(state.webcamStream)) {
+  if (!state.webcamEnabled || !hasLiveVideo(state.webcamStream)) {
     return "none";
   }
   if (pointInsideRect(point, getResizeHandleRect())) {
@@ -386,6 +832,15 @@ function updateCanvasCursor(point) {
   } else {
     canvas.style.cursor = "default";
   }
+}
+
+function clearWebcamDragState() {
+  if (state.drag.pointerId !== null && canvas.hasPointerCapture(state.drag.pointerId)) {
+    canvas.releasePointerCapture(state.drag.pointerId);
+  }
+  state.drag.active = false;
+  state.drag.mode = "none";
+  state.drag.pointerId = null;
 }
 
 function drawRoundedRectPath(x, y, width, height, radius) {
@@ -412,7 +867,11 @@ function drawCircularPath(x, y, width, height) {
   ctx.closePath();
 }
 
-function drawAdjustedScreen(videoEl, targetCtx = ctx) {
+function drawAdjustedScreen(
+  videoEl,
+  targetCtx = ctx,
+  demoEffect = { scale: 1, focusNormX: 0.5, focusNormY: 0.5 }
+) {
   const fitRect = getBaseScreenRect(
     videoEl.videoWidth,
     videoEl.videoHeight,
@@ -434,10 +893,28 @@ function drawAdjustedScreen(videoEl, targetCtx = ctx) {
 
   const drawX = centerX - scaledWidth / 2 + offsetXPx;
   const drawY = centerY - scaledHeight / 2 + offsetYPx;
-  targetCtx.drawImage(videoEl, drawX, drawY, scaledWidth, scaledHeight);
+
+  let finalX = drawX;
+  let finalY = drawY;
+  let finalWidth = scaledWidth;
+  let finalHeight = scaledHeight;
+
+  const demoScale = clampNumber(Number(demoEffect.scale) || 1, 1, 2);
+  if (demoScale > 1.001) {
+    const focusNormX = clampNumber(Number(demoEffect.focusNormX) || 0.5, 0, 1);
+    const focusNormY = clampNumber(Number(demoEffect.focusNormY) || 0.5, 0, 1);
+    const focusX = drawX + scaledWidth * focusNormX;
+    const focusY = drawY + scaledHeight * focusNormY;
+    finalWidth = scaledWidth * demoScale;
+    finalHeight = scaledHeight * demoScale;
+    finalX = focusX - finalWidth * focusNormX;
+    finalY = focusY - finalHeight * focusNormY;
+  }
+
+  targetCtx.drawImage(videoEl, finalX, finalY, finalWidth, finalHeight);
 }
 
-function snapshotCurrentScreenFrame() {
+function snapshotCurrentScreenFrame(demoEffect) {
   ensureLastScreenFrameBuffer();
   if (!state.lastScreenFrameCtx) {
     return;
@@ -446,11 +923,16 @@ function snapshotCurrentScreenFrame() {
   state.lastScreenFrameCtx.clearRect(0, 0, state.lastScreenFrameCanvas.width, state.lastScreenFrameCanvas.height);
   state.lastScreenFrameCtx.fillStyle = "#0d1014";
   state.lastScreenFrameCtx.fillRect(0, 0, state.lastScreenFrameCanvas.width, state.lastScreenFrameCanvas.height);
-  drawAdjustedScreen(screenVideo, state.lastScreenFrameCtx);
+  drawAdjustedScreen(screenVideo, state.lastScreenFrameCtx, demoEffect);
   state.hasLastScreenFrame = true;
 }
 
 function drawScene() {
+  const nowMs = performance.now();
+  const previousDemoStage = state.demoZoom.stage;
+  updateDemoZoom(nowMs);
+  const demoEffect = getDemoScreenEffect(state.demoZoom);
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#0d1014";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -462,15 +944,15 @@ function drawScene() {
   });
 
   if (screenRenderMode === "live") {
-    drawAdjustedScreen(screenVideo);
-    snapshotCurrentScreenFrame();
+    drawAdjustedScreen(screenVideo, ctx, demoEffect);
+    snapshotCurrentScreenFrame(demoEffect);
   } else if (screenRenderMode === "hold" && state.lastScreenFrameCanvas) {
     ctx.drawImage(state.lastScreenFrameCanvas, 0, 0, canvas.width, canvas.height);
   } else {
     // Keep output visually stable when no screen frame is available.
   }
 
-  if (webcamVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+  if (state.webcamEnabled && webcamVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     const { x, y, width, height } = state.webcamOverlay;
     ctx.save();
 
@@ -517,6 +999,10 @@ function drawScene() {
     ctx.restore();
   }
 
+  if (previousDemoStage !== state.demoZoom.stage) {
+    refreshDemoStatus();
+  }
+
   state.drawFrameId = window.requestAnimationFrame(drawScene);
 }
 
@@ -559,6 +1045,8 @@ function resetScreenControls() {
 function resetWebcamControls() {
   webcamSizeRange.value = "24";
   webcamShapeSelect.value = "rounded";
+  cameraEnabledToggle.checked = true;
+  state.webcamEnabled = true;
   mirrorToggle.checked = true;
   setOverlaySizeFromSlider();
   placeOverlayAtBottomRight();
@@ -631,8 +1119,12 @@ function handleScreenTrackEnded(trackId) {
 
   resetScreenFreezeWatch();
   state.screenStream = null;
+  state.screenSurfaceType = "unknown";
+  clearDemoQueue();
+  resetDemoZoomState();
   screenVideo.srcObject = null;
   refreshControlState();
+  refreshDemoStatus();
 
   if (isRecordingActive()) {
     setStatus(sourcesStatus, "screen lost, recording continues - click Replace Screen");
@@ -661,6 +1153,7 @@ function handleWebcamTrackEnded(trackId) {
 async function attachScreenStream(displayStream) {
   const previousScreenStream = state.screenStream;
   state.screenStream = displayStream;
+  state.screenSurfaceType = getScreenSurfaceType(displayStream);
   resetScreenFreezeWatch();
   screenVideo.srcObject = displayStream;
   await screenVideo.play();
@@ -681,6 +1174,8 @@ async function attachScreenStream(displayStream) {
       { once: true }
     );
   }
+
+  refreshDemoStatus();
 }
 
 async function attachWebcamStream(webcamStream) {
@@ -708,12 +1203,12 @@ async function attachWebcamStream(webcamStream) {
 }
 
 async function startSources() {
+  setSourceAction("starting");
   try {
-    if (!navigator.mediaDevices?.getDisplayMedia || !navigator.mediaDevices?.getUserMedia) {
-      throw new Error("This browser does not support required media capture APIs.");
-    }
+    assertCaptureApisAvailable();
 
     setStatus(sourcesStatus, "requesting permissions...");
+    setCaptureHint("Waiting for OS/browser capture prompts...", "pending");
     clearLastScreenFrame();
     resetScreenFreezeWatch();
 
@@ -735,6 +1230,8 @@ async function startSources() {
     await attachScreenStream(displayStream);
     await attachWebcamStream(webcamStream);
 
+    clearDemoQueue();
+    resetDemoZoomState();
     setCanvasResolution();
     stopDrawLoop();
     drawScene();
@@ -743,20 +1240,27 @@ async function startSources() {
     setUiForRecordingState(false);
     setStatus(sourcesStatus, "ready");
     setStatus(recordingStatus, "idle");
+    setCaptureHint("Sources live. You can record now.", "ok");
+    refreshDemoStatus();
   } catch (error) {
     stopSources();
-    const message = error instanceof Error ? error.message : "Failed to start sources.";
+    const message = describeCaptureError(error, "start");
     setStatus(sourcesStatus, `error: ${message}`);
+    setCaptureHint(message, "error");
+    console.error("[frameforge] startSources failed:", error);
+    refreshDemoStatus();
+  } finally {
+    setSourceAction("idle");
   }
 }
 
 async function replaceScreenSource() {
+  setSourceAction("replacing");
   try {
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      throw new Error("This browser does not support screen capture.");
-    }
+    assertDisplayCaptureApiAvailable();
 
     setStatus(sourcesStatus, "select a screen...");
+    setCaptureHint("Choose the screen/window to replace.", "pending");
     const fps = Number.parseInt(fpsSelect.value, 10);
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: fps, max: fps }, cursor: "always" },
@@ -764,6 +1268,8 @@ async function replaceScreenSource() {
     });
 
     await attachScreenStream(displayStream);
+    clearDemoQueue();
+    resetDemoZoomState();
 
     if (!state.drawFrameId) {
       drawScene();
@@ -774,13 +1280,22 @@ async function replaceScreenSource() {
       setUiForRecordingState(false);
     }
     setStatus(sourcesStatus, "ready");
+    setCaptureHint("Screen source replaced.", "ok");
+    refreshDemoStatus();
   } catch (error) {
+    const message = describeCaptureError(error, "replace");
     if (error instanceof DOMException && error.name === "AbortError") {
       setStatus(sourcesStatus, "screen selection canceled");
+      setCaptureHint(message, "idle");
+      refreshDemoStatus();
       return;
     }
-    const message = error instanceof Error ? error.message : "Failed to replace screen.";
     setStatus(sourcesStatus, `error: ${message}`);
+    setCaptureHint(message, "error");
+    console.error("[frameforge] replaceScreenSource failed:", error);
+    refreshDemoStatus();
+  } finally {
+    setSourceAction("idle");
   }
 }
 
@@ -797,6 +1312,7 @@ function stopSources() {
 
   state.screenStream = null;
   state.webcamStream = null;
+  state.screenSurfaceType = "unknown";
   screenVideo.srcObject = null;
   webcamVideo.srcObject = null;
 
@@ -813,10 +1329,13 @@ function stopSources() {
     setUiForRecordingState(false);
     setStatus(sourcesStatus, "idle");
     setStatus(recordingStatus, "idle");
+    setCaptureHint("Ready to request screen, camera, and microphone permissions.", "idle");
+    refreshDemoStatus();
     return;
   }
 
   setStatus(sourcesStatus, "sources stopped, recording continues");
+  refreshDemoStatus();
 }
 
 async function startRecording() {
@@ -1076,9 +1595,7 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerup", (event) => {
   if (state.drag.active && state.drag.pointerId === event.pointerId) {
-    state.drag.active = false;
-    state.drag.mode = "none";
-    state.drag.pointerId = null;
+    clearWebcamDragState();
     if (canvas.hasPointerCapture(event.pointerId)) {
       canvas.releasePointerCapture(event.pointerId);
     }
@@ -1087,9 +1604,7 @@ canvas.addEventListener("pointerup", (event) => {
 });
 
 canvas.addEventListener("pointercancel", () => {
-  state.drag.active = false;
-  state.drag.mode = "none";
-  state.drag.pointerId = null;
+  clearWebcamDragState();
   canvas.style.cursor = "default";
 });
 
@@ -1142,6 +1657,75 @@ webcamSizeRange.addEventListener("input", () => {
   updateSliderReadouts();
 });
 
+demoModeToggle.addEventListener("change", () => {
+  updateDemoSettingsFromUi();
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoTriggerClickToggle.addEventListener("change", () => {
+  updateDemoSettingsFromUi();
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoTriggerTypeToggle.addEventListener("change", () => {
+  updateDemoSettingsFromUi();
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoPresetSelect.addEventListener("change", () => {
+  if (demoPresetSelect.value !== "custom") {
+    setDemoPresetInUi(demoPresetSelect.value);
+  }
+  updateDemoSettingsFromUi();
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoZoomStrengthRange.addEventListener("input", () => {
+  updateDemoSettingsFromUi({ markCustom: true });
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoZoomDurationRange.addEventListener("input", () => {
+  updateDemoSettingsFromUi({ markCustom: true });
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoCooldownRange.addEventListener("input", () => {
+  updateDemoSettingsFromUi({ markCustom: true });
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+demoTypingHoldRange.addEventListener("input", () => {
+  updateDemoSettingsFromUi({ markCustom: true });
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+connectExtensionBtn.addEventListener("click", () => {
+  connectDemoBridge();
+});
+
+demoResetBtn.addEventListener("click", () => {
+  resetDemoControls();
+  syncDemoConfigToBridge();
+  refreshDemoStatus();
+});
+
+cameraEnabledToggle.addEventListener("change", () => {
+  state.webcamEnabled = cameraEnabledToggle.checked;
+  if (!state.webcamEnabled) {
+    clearWebcamDragState();
+    canvas.style.cursor = "default";
+  }
+});
+
 resetScreenBtn.addEventListener("click", () => {
   resetScreenControls();
 });
@@ -1165,6 +1749,7 @@ window.addEventListener("beforeunload", (event) => {
 
 window.addEventListener("pagehide", () => {
   stopSources();
+  destroyDemoBridge();
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -1175,6 +1760,12 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+window.addEventListener("resize", () => {
+  syncDemoConfigToBridge();
+});
+
+setDemoPresetInUi(DEFAULT_DEMO_PRESET);
+updateDemoSettingsFromUi();
 setCanvasResolution();
 updateScreenTransformFromUi();
 updateSliderReadouts();
@@ -1182,3 +1773,11 @@ setUiForSourceState(false);
 setUiForRecordingState(false);
 updateElapsedClock();
 updateRecordingStartTime();
+state.webcamEnabled = cameraEnabledToggle.checked;
+setCaptureHint(
+  state.platformMode === "desktop"
+    ? "Desktop mode: click Start Sources and approve macOS screen/camera/mic permissions when prompted."
+    : "Click Start Sources to grant browser screen, camera, and microphone access.",
+  "idle"
+);
+refreshDemoStatus();
