@@ -800,6 +800,7 @@ dependencies = [
 name = "frameforge-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "rdev",
  "serde",
  "serde_json",

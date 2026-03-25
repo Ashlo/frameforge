@@ -73,3 +73,7 @@ export function createDesktopDemoBridge({ onStatus, onEvent, onError } = {}) {
     destroy,
   };
 }
+
+export async function exportDemoMedia(request) {
+  return getTauriApi().invoke("demo_export_media", { request });
+}

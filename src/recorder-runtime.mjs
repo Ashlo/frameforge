@@ -69,6 +69,8 @@ const sourcesStatus = document.getElementById("sourcesStatus");
 const recordingStatus = document.getElementById("recordingStatus");
 const elapsedTime = document.getElementById("elapsedTime");
 const recordingStartTime = document.getElementById("recordingStartTime");
+const rigSummary = document.getElementById("rigSummary");
+const demoSummary = document.getElementById("demoSummary");
 
 const initialDemoPreset = applyPreset(DEFAULT_DEMO_PRESET);
 const platformMode = isDesktopRuntime() ? "desktop" : "web";
@@ -196,6 +198,21 @@ function updateRecordingStartTime() {
 
 function setStatus(el, value) {
   el.textContent = value;
+}
+
+function setPanelSummary(el, value, tone = "idle") {
+  if (!el) {
+    return;
+  }
+  el.textContent = value;
+  el.dataset.tone = tone;
+}
+
+function updateRigSummary() {
+  const [, height] = resolutionSelect.value.split("x");
+  const resolutionLabel = height ? `${height}p` : resolutionSelect.value;
+  const cameraLabel = cameraEnabledToggle.checked ? "camera on" : "camera off";
+  setPanelSummary(rigSummary, `${resolutionLabel} / ${fpsSelect.value} fps / ${cameraLabel}`);
 }
 
 function isRecordingActive() {
@@ -365,6 +382,7 @@ function updateSliderReadouts() {
   demoZoomDurationValue.textContent = `${demoZoomDurationRange.value}ms`;
   demoCooldownValue.textContent = `${demoCooldownRange.value}ms`;
   demoTypingHoldValue.textContent = `${demoTypingHoldRange.value}ms`;
+  updateRigSummary();
 }
 
 function updateScreenTransformFromUi() {
@@ -375,12 +393,13 @@ function updateScreenTransformFromUi() {
   updateSliderReadouts();
 }
 
-function setDemoStatus(text, tone = "idle") {
+function setDemoStatus(text, tone = "idle", summaryText = text) {
   demoStatus.textContent = text;
   const statusEl = demoStatus.closest(".demo-status");
   if (statusEl) {
     statusEl.dataset.state = tone;
   }
+  setPanelSummary(demoSummary, summaryText, tone);
 }
 
 function getScreenSurfaceType(stream) {
@@ -509,57 +528,57 @@ function refreshDemoStatus() {
   }
 
   if (!state.demo.enabled) {
-    setDemoStatus("demo mode off", "idle");
+    setDemoStatus("demo mode off", "idle", "off");
     return;
   }
 
   if (state.demoTelemetry.lastBridgeError) {
     const prefix = state.platformMode === "desktop" ? "desktop monitor error" : "extension error";
-    setDemoStatus(`${prefix}: ${state.demoTelemetry.lastBridgeError}`, "error");
+    setDemoStatus(`${prefix}: ${state.demoTelemetry.lastBridgeError}`, "error", "error");
     return;
   }
 
   if (!state.demoTelemetry.connected) {
     if (state.platformMode === "desktop") {
-      setDemoStatus("desktop monitor off - click Enable Input Monitor", "warn");
+      setDemoStatus("desktop monitor off - click Enable Input Monitor", "warn", "disconnected");
     } else {
-      setDemoStatus("disconnected - click Connect Extension", "warn");
+      setDemoStatus("disconnected - click Connect Extension", "warn", "disconnected");
     }
     return;
   }
 
   if (!state.demoTelemetry.sourceTabArmed) {
     if (state.platformMode === "desktop") {
-      setDemoStatus("connected, monitor idle", "warn");
+      setDemoStatus("connected, monitor idle", "warn", "monitor idle");
     } else {
-      setDemoStatus("connected, waiting for source tab", "warn");
+      setDemoStatus("connected, waiting for source tab", "warn", "connected");
     }
     return;
   }
 
   if (hasLiveVideo(state.screenStream) && !isDemoSourceSupported()) {
-    setDemoStatus("unsupported source: use browser tab capture", "warn");
+    setDemoStatus("unsupported source: use browser tab capture", "warn", "unsupported");
     return;
   }
 
   if (state.demoZoom.active) {
-    setDemoStatus("auto-focus active", "ready");
+    setDemoStatus("auto-focus active", "ready", "active");
     return;
   }
 
   if (sourceName) {
     if (state.platformMode === "desktop") {
-      setDemoStatus("desktop input monitor active", "ready");
+      setDemoStatus("desktop input monitor active", "ready", "armed");
     } else {
-      setDemoStatus(`armed on ${sourceName}`, "ready");
+      setDemoStatus(`armed on ${sourceName}`, "ready", "armed");
     }
     return;
   }
 
   if (state.platformMode === "desktop") {
-    setDemoStatus("ready for global click + typing focus", "ready");
+    setDemoStatus("ready for global click + typing focus", "ready", "ready");
   } else {
-    setDemoStatus("ready for click + typing focus", "ready");
+    setDemoStatus("ready for click + typing focus", "ready", "ready");
   }
 }
 
@@ -1624,11 +1643,13 @@ resolutionSelect.addEventListener("change", () => {
   setCanvasResolution();
   resetDownloadLink();
   revokeDownloadUrl();
+  updateRigSummary();
 });
 
 fpsSelect.addEventListener("change", () => {
   resetDownloadLink();
   revokeDownloadUrl();
+  updateRigSummary();
 });
 
 formatSelect.addEventListener("change", () => {
@@ -1724,6 +1745,7 @@ cameraEnabledToggle.addEventListener("change", () => {
     clearWebcamDragState();
     canvas.style.cursor = "default";
   }
+  updateRigSummary();
 });
 
 resetScreenBtn.addEventListener("click", () => {

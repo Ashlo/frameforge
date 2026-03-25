@@ -1,5 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -42,6 +47,27 @@ struct DemoEventPayload {
     x_norm: f64,
     y_norm: f64,
     intensity: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoExportRequest {
+    video_bytes_base64: String,
+    video_extension: String,
+    suggested_base_name: String,
+    gif_start_ms: u64,
+    gif_end_ms: u64,
+    gif_width: u32,
+    gif_fps: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoExportResult {
+    canceled: bool,
+    video_path: Option<String>,
+    gif_path: Option<String>,
+    gif_error: Option<String>,
 }
 
 struct AppState {
@@ -111,6 +137,125 @@ fn now_ms() -> u64 {
     now.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_millis() as u64
+}
+
+fn sanitize_base_name(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "frameforge-demo".to_string();
+    }
+
+    let mut output = String::new();
+    let mut last_was_dash = false;
+    for ch in trimmed.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() || ch == '_' {
+            last_was_dash = false;
+            Some(ch)
+        } else if ch == '-' || ch.is_ascii_whitespace() {
+            if last_was_dash {
+                None
+            } else {
+                last_was_dash = true;
+                Some('-')
+            }
+        } else {
+            None
+        };
+
+        if let Some(ch) = normalized {
+            output.push(ch);
+        }
+    }
+
+    let output = output.trim_matches('-').to_string();
+    if output.is_empty() {
+        "frameforge-demo".to_string()
+    } else {
+        output
+    }
+}
+
+fn sanitize_extension(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "mkv" => "mkv",
+        "webm" => "webm",
+        _ => "webm",
+    }
+}
+
+fn escape_applescript(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn select_save_path(title: &str, file_name: &str, extension: &str) -> Result<Option<PathBuf>, String> {
+    let script = format!(
+        "POSIX path of (choose file name with prompt \"{}\" default name \"{}\")",
+        escape_applescript(title),
+        escape_applescript(file_name)
+    );
+
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| format!("Could not open macOS save dialog: {error}"))?;
+
+    if output.status.success() {
+        let raw_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw_path.is_empty() {
+            return Ok(None);
+        }
+
+        let mut path = PathBuf::from(raw_path);
+        if path.extension().is_none() {
+            path.set_extension(extension);
+        }
+        return Ok(Some(path));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if stderr.contains("User canceled") || stderr.contains("user canceled") {
+        return Ok(None);
+    }
+
+    Err(format!("Could not open save dialog: {}", stderr.trim()))
+}
+
+fn resolve_ffmpeg_path() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("ffmpeg"));
+            candidates.push(exe_dir.join("../Resources/bin/ffmpeg"));
+            candidates.push(exe_dir.join("../Resources/ffmpeg"));
+        }
+    }
+
+    candidates.push(PathBuf::from("/opt/homebrew/bin/ffmpeg"));
+    candidates.push(PathBuf::from("/usr/local/bin/ffmpeg"));
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    PathBuf::from("ffmpeg")
+}
+
+fn build_gif_filter(width: u32, fps: u32) -> String {
+    format!(
+        "fps={fps},scale={width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a"
+    )
+}
+
+fn format_ffmpeg_error(stderr: &[u8]) -> String {
+    let message = String::from_utf8_lossy(stderr).trim().to_string();
+    if message.is_empty() {
+        "FFmpeg failed to generate GIF.".to_string()
+    } else {
+        message
+    }
 }
 
 fn key_is_typing_like(key: Key) -> bool {
@@ -325,6 +470,87 @@ fn recorder_stop_recording() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn demo_export_media(request: DemoExportRequest) -> Result<DemoExportResult, String> {
+    let clip_duration_ms = request.gif_end_ms.saturating_sub(request.gif_start_ms);
+    if clip_duration_ms == 0 {
+        return Err("Trim end must be after trim start.".to_string());
+    }
+
+    let base_name = sanitize_base_name(&request.suggested_base_name);
+    let video_extension = sanitize_extension(&request.video_extension);
+    let video_file_name = format!("{base_name}.{video_extension}");
+    let gif_file_name = format!("{base_name}.gif");
+
+    let Some(video_path) = select_save_path("Save Demo Maker Video", &video_file_name, video_extension)? else {
+        return Ok(DemoExportResult {
+            canceled: true,
+            video_path: None,
+            gif_path: None,
+            gif_error: None,
+        });
+    };
+
+    let Some(gif_path) = select_save_path("Save Demo Maker GIF", &gif_file_name, "gif")? else {
+        return Ok(DemoExportResult {
+            canceled: true,
+            video_path: None,
+            gif_path: None,
+            gif_error: None,
+        });
+    };
+
+    let bytes = BASE64_STANDARD
+        .decode(request.video_bytes_base64.as_bytes())
+        .map_err(|error| format!("Could not decode recorded video bytes: {error}"))?;
+
+    if let Some(parent) = video_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("Could not create video folder: {error}"))?;
+    }
+    if let Some(parent) = gif_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("Could not create GIF folder: {error}"))?;
+    }
+
+    fs::write(&video_path, bytes).map_err(|error| format!("Could not save demo video: {error}"))?;
+
+    let ffmpeg_path = resolve_ffmpeg_path();
+    let start_seconds = format!("{:.3}", request.gif_start_ms as f64 / 1000.0);
+    let duration_seconds = format!("{:.3}", clip_duration_ms as f64 / 1000.0);
+    let gif_filter = build_gif_filter(request.gif_width.max(320), request.gif_fps.max(6));
+
+    let output = Command::new(&ffmpeg_path)
+        .arg("-y")
+        .arg("-ss")
+        .arg(start_seconds)
+        .arg("-t")
+        .arg(duration_seconds)
+        .arg("-i")
+        .arg(&video_path)
+        .arg("-vf")
+        .arg(gif_filter)
+        .arg("-loop")
+        .arg("0")
+        .arg(&gif_path)
+        .output()
+        .map_err(|error| format!("Could not start FFmpeg at '{}': {error}", ffmpeg_path.display()))?;
+
+    if !output.status.success() {
+        return Ok(DemoExportResult {
+            canceled: false,
+            video_path: Some(video_path.to_string_lossy().to_string()),
+            gif_path: None,
+            gif_error: Some(format_ffmpeg_error(&output.stderr)),
+        });
+    }
+
+    Ok(DemoExportResult {
+        canceled: false,
+        video_path: Some(video_path.to_string_lossy().to_string()),
+        gif_path: Some(gif_path.to_string_lossy().to_string()),
+        gif_error: None,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(Arc::new(AppState {
@@ -340,7 +566,8 @@ fn main() {
             recorder_stop_sources,
             recorder_replace_screen_source,
             recorder_start_recording,
-            recorder_stop_recording
+            recorder_stop_recording,
+            demo_export_media
         ])
         .run(tauri::generate_context!())
         .expect("error while running frameforge desktop");
