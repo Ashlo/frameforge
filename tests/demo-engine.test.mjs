@@ -41,37 +41,44 @@ test("enqueueDemoEvent keeps queue bounded", () => {
 
 test("beginDemoZoom and stepDemoZoom run full zoom cycle", () => {
   const settings = {
-    zoomStrength: 0.3,
-    zoomDurationMs: 900,
-    cooldownMs: 500,
-    typingHoldMs: 1000,
+    zoomStrength: 0.56,
+    zoomDurationMs: 980,
+    cooldownMs: 320,
+    typingHoldMs: 1280,
   };
   const event = {
     kind: "click",
     t: 0,
-    xNorm: 0.2,
-    yNorm: 0.75,
-    intensity: 0,
+    xNorm: 0.03,
+    yNorm: 0.95,
+    intensity: 0.58,
   };
 
   let zoom = beginDemoZoom(null, event, settings, 1000);
   assert.equal(zoom.active, true);
   assert.equal(zoom.stage, "zoom-in");
-  assert.ok(zoom.scaleTarget > 1);
-  assert.equal(zoom.focusNormX, 0.2);
-  assert.equal(zoom.focusNormY, 0.75);
+  assert.ok(zoom.scaleTarget > 1.5);
+  assert.equal(zoom.focusNormX, 0.5);
+  assert.equal(zoom.focusNormY, 0.5);
+  assert.ok(zoom.focusTargetX > event.xNorm);
+  assert.ok(zoom.focusTargetY < event.yNorm);
 
   zoom = stepDemoZoom(zoom, settings, 1100);
   assert.equal(zoom.stage, "zoom-in");
   assert.ok(zoom.scaleCurrent > 1);
+  assert.ok(zoom.focusNormX < 0.5);
+  assert.ok(zoom.focusNormX > zoom.focusTargetX);
 
   zoom = stepDemoZoom(zoom, settings, zoom.zoomInEndsAt + 20);
   assert.equal(zoom.stage, "hold");
   assert.equal(zoom.scaleCurrent, zoom.scaleTarget);
+  assert.equal(zoom.focusNormX, zoom.focusTargetX);
+  assert.equal(zoom.focusNormY, zoom.focusTargetY);
 
   zoom = stepDemoZoom(zoom, settings, zoom.holdEndsAt + 30);
   assert.equal(zoom.stage, "zoom-out");
   assert.ok(zoom.scaleCurrent < zoom.scaleTarget);
+  assert.equal(zoom.focusNormX, zoom.focusTargetX);
 
   zoom = stepDemoZoom(zoom, settings, zoom.zoomOutEndsAt + 1);
   assert.equal(zoom.active, false);
@@ -87,7 +94,7 @@ test("getDemoScreenEffect returns bounded values", () => {
     focusNormY: 2.1,
   });
 
-  assert.equal(effect.scale, 2);
+  assert.equal(effect.scale, 2.1);
   assert.equal(effect.focusNormX, 0);
   assert.equal(effect.focusNormY, 1);
 });

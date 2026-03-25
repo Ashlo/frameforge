@@ -1,16 +1,3 @@
-export function deriveControlState({ hasScreen, hasWebcam, hasAnySource, recording }) {
-  return {
-    startSourcesDisabled: recording || (hasScreen && hasWebcam),
-    stopSourcesDisabled: recording || !hasAnySource,
-    replaceScreenDisabled: !hasAnySource && !recording,
-    startRecordDisabled: recording || !(hasScreen && hasWebcam),
-    stopRecordDisabled: !recording,
-    resolutionDisabled: hasAnySource,
-    fpsDisabled: hasAnySource,
-    formatDisabled: recording,
-  };
-}
-
 export function getBaseScreenRect(sourceWidth, sourceHeight, targetWidth, targetHeight, fitMode = "contain") {
   if (!sourceWidth || !sourceHeight || !targetWidth || !targetHeight) {
     return null;

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Frameforge Demo Recorder</title>
+    <meta
+      name="description"
+      content="Record short product walkthroughs with smooth auto-focus and export both video and GIF."
+    />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <p class="eyebrow">Desktop Demo Capture</p>
+          <h1>Demo Recorder</h1>
+          <p class="lead">
+            Record short product walkthroughs, let clicks and typing drive focus, then export a
+            finished video or a clipped GIF.
+          </p>
+        </div>
+
+        <div class="header-rail">
+          <span id="drMonitorBadge" class="header-pill" data-tone="idle">desktop monitor</span>
+          <span class="header-note">Screen-first workflow for shareable product clips</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="stage-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Live Composition</p>
+              <h2>Preview-first workspace</h2>
+            </div>
+
+            <button id="drReconnectMonitorBtn" class="btn btn-ghost" type="button">
+              Reconnect Monitor
+            </button>
+          </div>
+
+          <div class="telemetry-strip" aria-label="Session telemetry">
+            <article class="telemetry-card">
+              <span class="telemetry-label">Sources</span>
+              <strong id="drSourcesStatus">idle</strong>
+            </article>
+
+            <article class="telemetry-card">
+              <span class="telemetry-label">Recording</span>
+              <strong id="drRecordingStatus">idle</strong>
+            </article>
+
+            <article class="telemetry-card">
+              <span class="telemetry-label">Auto Focus</span>
+              <strong id="drFocusSummary">static</strong>
+            </article>
+
+            <article class="telemetry-card">
+              <span class="telemetry-label">Elapsed</span>
+              <strong id="drElapsedTime">00:00</strong>
+            </article>
+
+            <article class="telemetry-card">
+              <span class="telemetry-label">Events</span>
+              <strong id="drEventSummary">0 seen</strong>
+            </article>
+          </div>
+
+          <div class="stage-frame">
+            <canvas id="drCompositeCanvas" width="1280" height="720"></canvas>
+          </div>
+
+          <p class="stage-caption">
+            Click and typing activity can drive live focus while recording. If the monitor is
+            unavailable, the recorder still captures a stable static frame.
+          </p>
+        </section>
+
+        <aside class="control-rail">
+          <section class="panel">
+            <div class="panel-head compact">
+              <div>
+                <p class="section-kicker">Capture</p>
+                <h2>Record flow</h2>
+              </div>
+            </div>
+
+            <div class="button-stack">
+              <button id="drStartSourcesBtn" class="btn btn-primary" type="button">
+                Start Source Capture
+              </button>
+              <button id="drReplaceScreenBtn" class="btn" type="button" disabled>
+                Replace Screen
+              </button>
+              <button id="drStopSourcesBtn" class="btn btn-ghost" type="button" disabled>
+                Stop Source
+              </button>
+            </div>
+
+            <p id="drCaptureHint" class="status-note" data-tone="idle">
+              Choose a screen or window to start a short demo session.
+            </p>
+
+            <div class="record-row">
+              <button id="drStartRecordBtn" class="btn btn-accent" type="button" disabled>
+                Start Recording
+              </button>
+              <button id="drStopRecordBtn" class="btn" type="button" disabled>
+                Stop
+              </button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head compact">
+              <div>
+                <p class="section-kicker">Auto Focus</p>
+                <h2>Interaction-driven zoom</h2>
+              </div>
+            </div>
+
+            <label class="toggle-row">
+              <span>Enable auto focus</span>
+              <input id="drDemoModeToggle" type="checkbox" checked />
+            </label>
+
+            <p id="drDemoStatus" class="status-note" data-tone="idle">
+              Desktop input monitor is connecting.
+            </p>
+
+            <label class="field">
+              <span>Preset</span>
+              <select id="drDemoPresetSelect">
+                <option value="subtle">Subtle</option>
+                <option value="balanced">Balanced</option>
+                <option value="intense">Intense</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+
+            <button id="drPreviewFocusBtn" class="btn btn-ghost" type="button">
+              Test Focus
+            </button>
+
+            <button id="drOpenAccessibilityBtn" class="btn btn-ghost" type="button" hidden>
+              Open Input Monitoring Settings
+            </button>
+
+            <details class="advanced-panel">
+              <summary>Advanced controls</summary>
+
+              <div class="advanced-grid">
+                <label class="toggle-row">
+                  <span>Click trigger</span>
+                  <input id="drTriggerClickToggle" type="checkbox" checked />
+                </label>
+
+                <label class="toggle-row">
+                  <span>Typing trigger</span>
+                  <input id="drTriggerTypeToggle" type="checkbox" checked />
+                </label>
+
+                <label class="slider-field">
+                  <span>Zoom strength</span>
+                  <input id="drZoomStrengthRange" type="range" min="5" max="95" value="24" />
+                  <output id="drZoomStrengthValue">24%</output>
+                </label>
+
+                <label class="slider-field">
+                  <span>Zoom duration</span>
+                  <input id="drZoomDurationRange" type="range" min="200" max="2000" value="700" />
+                  <output id="drZoomDurationValue">700ms</output>
+                </label>
+
+                <label class="slider-field">
+                  <span>Cooldown</span>
+                  <input id="drCooldownRange" type="range" min="0" max="3000" value="650" />
+                  <output id="drCooldownValue">650ms</output>
+                </label>
+
+                <label class="slider-field">
+                  <span>Typing hold</span>
+                  <input id="drTypingHoldRange" type="range" min="200" max="3000" value="1200" />
+                  <output id="drTypingHoldValue">1200ms</output>
+                </label>
+              </div>
+            </details>
+
+            <div class="field-row">
+              <label class="field">
+                <span>Resolution</span>
+                <select id="drResolutionSelect">
+                  <option value="1280x720">1280 × 720</option>
+                  <option value="1920x1080" selected>1920 × 1080</option>
+                  <option value="2560x1440">2560 × 1440</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>FPS</span>
+                <select id="drFpsSelect">
+                  <option value="24">24</option>
+                  <option value="30" selected>30</option>
+                  <option value="60">60</option>
+                </select>
+              </label>
+            </div>
+          </section>
+        </aside>
+      </main>
+
+      <section class="result-panel">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Preview And Export</p>
+            <h2>Save the finished composition</h2>
+          </div>
+        </div>
+
+        <div id="drResultEmpty" class="result-empty">
+          Record a short walkthrough to unlock preview, trim controls, and export actions.
+        </div>
+
+        <div id="drResultReady" class="result-ready" hidden>
+          <div class="result-grid">
+            <div class="result-preview-shell">
+              <video id="drResultVideo" class="result-video" controls playsinline></video>
+            </div>
+
+            <div class="result-controls">
+              <div class="meta-row">
+                <article class="meta-card">
+                  <span class="telemetry-label">Recorded</span>
+                  <strong id="drRecordedDuration">00:00</strong>
+                </article>
+
+                <article class="meta-card">
+                  <span class="telemetry-label">GIF Clip</span>
+                  <strong id="drGifDuration">00:00</strong>
+                </article>
+              </div>
+
+              <div class="trim-grid">
+                <label class="slider-field">
+                  <span>Trim start</span>
+                  <input id="drTrimStartRange" type="range" min="0" max="0" step="100" value="0" />
+                  <output id="drTrimStartValue">00:00</output>
+                </label>
+
+                <label class="slider-field">
+                  <span>Trim end</span>
+                  <input id="drTrimEndRange" type="range" min="0" max="0" step="100" value="0" />
+                  <output id="drTrimEndValue">00:00</output>
+                </label>
+              </div>
+
+              <div class="field-row">
+                <label class="field">
+                  <span>GIF preset</span>
+                  <select id="drGifPresetSelect">
+                    <option value="small">Small · 480w / 10fps</option>
+                    <option value="medium" selected>Medium · 640w / 12fps</option>
+                    <option value="large">Large · 720w / 15fps</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>Base file name</span>
+                  <input id="drBaseNameInput" type="text" class="text-field" />
+                </label>
+              </div>
+
+              <p id="drExportStatus" class="status-note" data-tone="idle">
+                Save the video first, or export a clipped GIF directly from this same recording.
+              </p>
+
+              <div class="export-actions">
+                <button id="drSaveVideoBtn" class="btn btn-primary" type="button" disabled>
+                  Save Video
+                </button>
+                <button id="drExportGifBtn" class="btn btn-accent" type="button" disabled>
+                  Export GIF
+                </button>
+              </div>
+
+              <div id="drPathSummary" class="path-summary" hidden>
+                <div>
+                  <span class="telemetry-label">Video</span>
+                  <p id="drVideoPath">Not saved yet</p>
+                </div>
+
+                <div>
+                  <span class="telemetry-label">GIF</span>
+                  <p id="drGifPath">Not exported yet</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <video id="drScreenVideo" playsinline muted></video>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

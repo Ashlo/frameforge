@@ -2,19 +2,56 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+#[cfg(target_os = "macos")]
+use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+#[cfg(target_os = "macos")]
+use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease, CFTypeRef};
+#[cfg(target_os = "macos")]
+use core_foundation_sys::dictionary::{
+    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreate, CFDictionaryRef,
+};
+#[cfg(target_os = "macos")]
+use core_foundation_sys::number::{kCFBooleanFalse, kCFBooleanTrue};
+#[cfg(target_os = "macos")]
+use core_foundation_sys::string::CFStringRef;
+#[cfg(target_os = "macos")]
+use core_graphics::event::{
+    CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy,
+    CGEventType, EventField,
+};
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rdev::{listen, Button, Event, EventType, Key};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrustedWithOptions(the_dict: CFDictionaryRef) -> bool;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOHIDCheckAccess(request_type: i32) -> i32;
+    fn IOHIDRequestAccess(request_type: i32) -> bool;
+}
+
+#[cfg(target_os = "macos")]
+const K_IO_HID_REQUEST_TYPE_LISTEN_EVENT: i32 = 1;
+#[cfg(target_os = "macos")]
+const K_IO_HID_ACCESS_TYPE_GRANTED: i32 = 0;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +71,10 @@ struct DemoConfig {
 struct DemoMonitorStatus {
     connected: bool,
     armed: bool,
+    monitor_started: bool,
+    accessibility_granted: bool,
+    input_monitoring_granted: bool,
+    native_event_count: u64,
     source_tab_id: Option<u32>,
     source_tab_title: String,
     last_error: Option<String>,
@@ -51,7 +92,22 @@ struct DemoEventPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DemoExportRequest {
+struct DemoVideoSaveRequest {
+    video_bytes_base64: String,
+    video_extension: String,
+    suggested_base_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoVideoSaveResult {
+    canceled: bool,
+    video_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoGifExportRequest {
     video_bytes_base64: String,
     video_extension: String,
     suggested_base_name: String,
@@ -63,17 +119,16 @@ struct DemoExportRequest {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DemoExportResult {
+struct DemoGifExportResult {
     canceled: bool,
-    video_path: Option<String>,
     gif_path: Option<String>,
-    gif_error: Option<String>,
 }
 
 struct AppState {
     demo_enabled: AtomicBool,
     monitor_connected: AtomicBool,
     monitor_started: AtomicBool,
+    native_event_count: AtomicU64,
     last_error: Mutex<Option<String>>,
     demo_config: Mutex<DemoConfig>,
     last_mouse_pos: Mutex<(f64, f64)>,
@@ -86,6 +141,7 @@ impl Default for AppState {
             demo_enabled: AtomicBool::new(false),
             monitor_connected: AtomicBool::new(false),
             monitor_started: AtomicBool::new(false),
+            native_event_count: AtomicU64::new(0),
             last_error: Mutex::new(None),
             demo_config: Mutex::new(DemoConfig::default()),
             last_mouse_pos: Mutex::new((0.0, 0.0)),
@@ -100,6 +156,10 @@ impl AppState {
         DemoMonitorStatus {
             connected: self.monitor_connected.load(Ordering::Relaxed),
             armed: self.demo_enabled.load(Ordering::Relaxed),
+            monitor_started: self.monitor_started.load(Ordering::Relaxed),
+            accessibility_granted: request_accessibility_permission(false),
+            input_monitoring_granted: request_input_monitoring_access(false),
+            native_event_count: self.native_event_count.load(Ordering::Relaxed),
             source_tab_id: None,
             source_tab_title: "Desktop input monitor".to_string(),
             last_error,
@@ -117,9 +177,9 @@ impl AppState {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+
         let width = cfg.screen_width.unwrap_or(1920.0).max(1.0);
         let height = cfg.screen_height.unwrap_or(1080.0).max(1.0);
-
         ((x / width).clamp(0.0, 1.0), (y / height).clamp(0.0, 1.0))
     }
 }
@@ -142,7 +202,7 @@ fn now_ms() -> u64 {
 fn sanitize_base_name(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return "frameforge-demo".to_string();
+        return "demo-recorder".to_string();
     }
 
     let mut output = String::new();
@@ -169,7 +229,7 @@ fn sanitize_base_name(value: &str) -> String {
 
     let output = output.trim_matches('-').to_string();
     if output.is_empty() {
-        "frameforge-demo".to_string()
+        "demo-recorder".to_string()
     } else {
         output
     }
@@ -252,57 +312,185 @@ fn build_gif_filter(width: u32, fps: u32) -> String {
 fn format_ffmpeg_error(stderr: &[u8]) -> String {
     let message = String::from_utf8_lossy(stderr).trim().to_string();
     if message.is_empty() {
-        "FFmpeg failed to generate GIF.".to_string()
+        "FFmpeg failed to generate the GIF.".to_string()
     } else {
         message
     }
 }
 
-fn key_is_typing_like(key: Key) -> bool {
+fn input_access_required_message() -> String {
+    "Desktop input access is required for auto focus. Grant Input Monitoring and Accessibility permission to Frameforge Demo Recorder, then restart the app.".to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn request_accessibility_permission(prompt: bool) -> bool {
+    unsafe {
+        let key = kAXTrustedCheckOptionPrompt as *const c_void;
+        let value = if prompt {
+            kCFBooleanTrue as *const c_void
+        } else {
+            kCFBooleanFalse as *const c_void
+        };
+        let keys = [key];
+        let values = [value];
+        let dictionary = CFDictionaryCreate(
+            kCFAllocatorDefault,
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        );
+
+        let trusted = AXIsProcessTrustedWithOptions(dictionary);
+        if !dictionary.is_null() {
+            CFRelease(dictionary as CFTypeRef);
+        }
+        trusted
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_accessibility_permission(_prompt: bool) -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn has_input_monitoring_access() -> bool {
+    unsafe { IOHIDCheckAccess(K_IO_HID_REQUEST_TYPE_LISTEN_EVENT) == K_IO_HID_ACCESS_TYPE_GRANTED }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn has_input_monitoring_access() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn request_input_monitoring_access(prompt: bool) -> bool {
+    if !prompt {
+        return has_input_monitoring_access();
+    }
+
+    unsafe { IOHIDRequestAccess(K_IO_HID_REQUEST_TYPE_LISTEN_EVENT) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_input_monitoring_access(_prompt: bool) -> bool {
+    true
+}
+
+fn decode_video_bytes(encoded: &str) -> Result<Vec<u8>, String> {
+    BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|error| format!("Could not decode recorded video bytes: {error}"))
+}
+
+fn ensure_parent_dir(path: &PathBuf, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("Could not create {label} folder: {error}"))?;
+    }
+    Ok(())
+}
+
+fn write_temp_video_file(bytes: &[u8], extension: &str) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir().join("frameforge-demo-recorder");
+    fs::create_dir_all(&directory).map_err(|error| format!("Could not create temp folder: {error}"))?;
+
+    let temp_path = directory.join(format!("gif-source-{}.{}", now_ms(), extension));
+    fs::write(&temp_path, bytes).map_err(|error| format!("Could not write temporary video: {error}"))?;
+    Ok(temp_path)
+}
+
+#[cfg(target_os = "macos")]
+fn keycode_is_typing_like(keycode: i64) -> bool {
     matches!(
-        key,
-        Key::KeyA
-            | Key::KeyB
-            | Key::KeyC
-            | Key::KeyD
-            | Key::KeyE
-            | Key::KeyF
-            | Key::KeyG
-            | Key::KeyH
-            | Key::KeyI
-            | Key::KeyJ
-            | Key::KeyK
-            | Key::KeyL
-            | Key::KeyM
-            | Key::KeyN
-            | Key::KeyO
-            | Key::KeyP
-            | Key::KeyQ
-            | Key::KeyR
-            | Key::KeyS
-            | Key::KeyT
-            | Key::KeyU
-            | Key::KeyV
-            | Key::KeyW
-            | Key::KeyX
-            | Key::KeyY
-            | Key::KeyZ
-            | Key::Num0
-            | Key::Num1
-            | Key::Num2
-            | Key::Num3
-            | Key::Num4
-            | Key::Num5
-            | Key::Num6
-            | Key::Num7
-            | Key::Num8
-            | Key::Num9
-            | Key::Space
-            | Key::Tab
-            | Key::Return
-            | Key::Backspace
-            | Key::Delete
+        keycode,
+        0x00
+            | 0x01
+            | 0x02
+            | 0x03
+            | 0x04
+            | 0x05
+            | 0x06
+            | 0x07
+            | 0x08
+            | 0x09
+            | 0x0B
+            | 0x0C
+            | 0x0D
+            | 0x0E
+            | 0x0F
+            | 0x10
+            | 0x11
+            | 0x12
+            | 0x13
+            | 0x14
+            | 0x15
+            | 0x16
+            | 0x17
+            | 0x18
+            | 0x19
+            | 0x1A
+            | 0x1B
+            | 0x1C
+            | 0x1D
+            | 0x1E
+            | 0x1F
+            | 0x20
+            | 0x21
+            | 0x22
+            | 0x23
+            | 0x24
+            | 0x25
+            | 0x26
+            | 0x27
+            | 0x28
+            | 0x29
+            | 0x2A
+            | 0x2B
+            | 0x2C
+            | 0x2D
+            | 0x2E
+            | 0x2F
+            | 0x30
+            | 0x31
+            | 0x32
+            | 0x33
+            | 0x41
+            | 0x43
+            | 0x45
+            | 0x47
+            | 0x4B
+            | 0x4C
+            | 0x4E
+            | 0x51
+            | 0x52
+            | 0x53
+            | 0x54
+            | 0x55
+            | 0x56
+            | 0x57
+            | 0x58
+            | 0x59
+            | 0x5B
+            | 0x5C
     )
+}
+
+fn set_last_error(state: &AppState, message: Option<String>) {
+    if let Ok(mut guard) = state.last_error.lock() {
+        *guard = message;
+    }
+}
+
+fn update_last_mouse_position(state: &AppState, x: f64, y: f64) {
+    if let Ok(mut guard) = state.last_mouse_pos.lock() {
+        *guard = (x, y);
+    }
+}
+
+fn note_native_event(state: &AppState) {
+    state.native_event_count.fetch_add(1, Ordering::Relaxed);
 }
 
 fn should_emit_type(state: &AppState) -> bool {
@@ -322,81 +510,193 @@ fn should_emit_type(state: &AppState) -> bool {
     if elapsed < cooldown_ms {
         return false;
     }
+
     *guard = now;
     true
 }
 
+#[cfg(target_os = "macos")]
 fn start_global_monitor(app: AppHandle, state: Arc<AppState>) {
     if state.monitor_started.swap(true, Ordering::Relaxed) {
         emit_status(&app, state.as_ref());
         return;
     }
 
-    state.monitor_connected.store(true, Ordering::Relaxed);
-    emit_status(&app, state.as_ref());
-
     thread::spawn(move || {
         let app_for_events = app.clone();
         let state_for_events = state.clone();
-        let callback = move |event: Event| match event.event_type {
-            EventType::MouseMove { x, y } => {
-                if let Ok(mut guard) = state_for_events.last_mouse_pos.lock() {
-                    *guard = (x, y);
-                }
-            }
-            EventType::ButtonPress(button) => {
-                if !state_for_events.demo_enabled.load(Ordering::Relaxed) {
-                    return;
-                }
+        let current_loop = CFRunLoop::get_current();
 
-                if !matches!(button, Button::Left | Button::Right | Button::Middle) {
-                    return;
+        let callback = move |_proxy: CGEventTapProxy, event_type: CGEventType, event: &CGEvent| {
+            match event_type {
+                CGEventType::MouseMoved
+                | CGEventType::LeftMouseDragged
+                | CGEventType::RightMouseDragged
+                | CGEventType::OtherMouseDragged => {
+                    let point = event.location();
+                    update_last_mouse_position(state_for_events.as_ref(), point.x, point.y);
                 }
-                let (x_norm, y_norm) = state_for_events.normalized_mouse_position();
-                emit_demo_event(
-                    &app_for_events,
-                    DemoEventPayload {
-                        kind: "click".to_string(),
-                        t: now_ms(),
-                        x_norm,
-                        y_norm,
-                        intensity: 0.0,
-                    },
-                );
+                CGEventType::LeftMouseDown | CGEventType::RightMouseDown | CGEventType::OtherMouseDown => {
+                    let point = event.location();
+                    update_last_mouse_position(state_for_events.as_ref(), point.x, point.y);
+
+                    if !state_for_events.demo_enabled.load(Ordering::Relaxed) {
+                        return None;
+                    }
+
+                    let button_number =
+                        event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
+                    if !matches!(button_number, 0 | 1 | 2) {
+                        return None;
+                    }
+
+                    note_native_event(state_for_events.as_ref());
+                    let (x_norm, y_norm) = state_for_events.normalized_mouse_position();
+                    emit_demo_event(
+                        &app_for_events,
+                        DemoEventPayload {
+                            kind: "click".to_string(),
+                            t: now_ms(),
+                            x_norm,
+                            y_norm,
+                            intensity: 0.58,
+                        },
+                    );
+                }
+                CGEventType::KeyDown => {
+                    if !state_for_events.demo_enabled.load(Ordering::Relaxed) {
+                        return None;
+                    }
+
+                    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                    if !keycode_is_typing_like(keycode) || !should_emit_type(state_for_events.as_ref()) {
+                        return None;
+                    }
+
+                    note_native_event(state_for_events.as_ref());
+                    let (x_norm, y_norm) = state_for_events.normalized_mouse_position();
+                    emit_demo_event(
+                        &app_for_events,
+                        DemoEventPayload {
+                            kind: "type".to_string(),
+                            t: now_ms(),
+                            x_norm,
+                            y_norm,
+                            intensity: 0.74,
+                        },
+                    );
+                }
+                CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                    set_last_error(
+                        state_for_events.as_ref(),
+                        Some(
+                            "Desktop input monitor was paused by macOS. Reopen the app or toggle auto focus to re-arm it."
+                                .to_string(),
+                        ),
+                    );
+                    state_for_events.monitor_connected.store(false, Ordering::Relaxed);
+                    emit_status(&app_for_events, state_for_events.as_ref());
+                }
+                _ => {}
             }
-            EventType::KeyPress(key) => {
-                if !state_for_events.demo_enabled.load(Ordering::Relaxed) {
-                    return;
-                }
-                if !key_is_typing_like(key) {
-                    return;
-                }
-                if !should_emit_type(state_for_events.as_ref()) {
-                    return;
-                }
-                let (x_norm, y_norm) = state_for_events.normalized_mouse_position();
-                emit_demo_event(
-                    &app_for_events,
-                    DemoEventPayload {
-                        kind: "type".to_string(),
-                        t: now_ms(),
-                        x_norm,
-                        y_norm,
-                        intensity: 0.6,
-                    },
-                );
-            }
-            _ => {}
+
+            None
         };
 
-        if let Err(error) = listen(callback) {
-            if let Ok(mut guard) = state.last_error.lock() {
-                *guard = Some(format!("{error:?}"));
+        let tap = match CGEventTap::new(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![
+                CGEventType::MouseMoved,
+                CGEventType::LeftMouseDragged,
+                CGEventType::RightMouseDragged,
+                CGEventType::OtherMouseDragged,
+                CGEventType::LeftMouseDown,
+                CGEventType::RightMouseDown,
+                CGEventType::OtherMouseDown,
+                CGEventType::KeyDown,
+                CGEventType::TapDisabledByTimeout,
+                CGEventType::TapDisabledByUserInput,
+            ],
+            callback,
+        ) {
+            Ok(tap) => tap,
+            Err(()) => {
+                state.monitor_started.store(false, Ordering::Relaxed);
+                state.monitor_connected.store(false, Ordering::Relaxed);
+                set_last_error(
+                    state.as_ref(),
+                    Some(
+                        "Desktop input monitor could not start. Grant Input Monitoring and Accessibility permission, then reopen the app."
+                            .to_string(),
+                    ),
+                );
+                emit_status(&app, state.as_ref());
+                return;
             }
-            state.monitor_connected.store(false, Ordering::Relaxed);
-            emit_status(&app, state.as_ref());
+        };
+
+        let loop_source = match tap.mach_port.create_runloop_source(0) {
+            Ok(loop_source) => loop_source,
+            Err(()) => {
+                state.monitor_started.store(false, Ordering::Relaxed);
+                state.monitor_connected.store(false, Ordering::Relaxed);
+                set_last_error(
+                    state.as_ref(),
+                    Some("Desktop input monitor could not create its run loop source.".to_string()),
+                );
+                emit_status(&app, state.as_ref());
+                return;
+            }
+        };
+
+        unsafe {
+            current_loop.add_source(&loop_source, kCFRunLoopCommonModes);
         }
+        tap.enable();
+        state.monitor_connected.store(true, Ordering::Relaxed);
+        set_last_error(state.as_ref(), None);
+        emit_status(&app, state.as_ref());
+        CFRunLoop::run_current();
+
+        state.monitor_connected.store(false, Ordering::Relaxed);
+        state.monitor_started.store(false, Ordering::Relaxed);
+        emit_status(&app, state.as_ref());
     });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_global_monitor(app: AppHandle, state: Arc<AppState>) {
+    if state.monitor_started.swap(true, Ordering::Relaxed) {
+        emit_status(&app, state.as_ref());
+        return;
+    }
+
+    state.monitor_connected.store(false, Ordering::Relaxed);
+    state.monitor_started.store(false, Ordering::Relaxed);
+    set_last_error(
+        state.as_ref(),
+        Some("Desktop input auto focus is only implemented on macOS in this build.".to_string()),
+    );
+    emit_status(&app, state.as_ref());
+}
+
+#[tauri::command]
+fn demo_open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+            .status()
+            .map_err(|error| format!("Could not open Input Monitoring settings: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Accessibility settings shortcut is only available on macOS.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -405,7 +705,24 @@ fn demo_set_enabled(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<DemoMonitorStatus, String> {
+    if enabled && (!request_accessibility_permission(false) || !request_input_monitoring_access(false)) {
+        state.demo_enabled.store(false, Ordering::Relaxed);
+        state.monitor_connected.store(false, Ordering::Relaxed);
+        set_last_error(state.inner().as_ref(), Some(input_access_required_message()));
+        let status = state.status();
+        let _ = app.emit_all("demo_monitor_status", status.clone());
+        return Ok(status);
+    }
+
     state.demo_enabled.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        state.monitor_connected.store(false, Ordering::Relaxed);
+        set_last_error(state.inner().as_ref(), None);
+        let status = state.status();
+        let _ = app.emit_all("demo_monitor_status", status.clone());
+        return Ok(status);
+    }
+    set_last_error(state.inner().as_ref(), None);
     start_global_monitor(app.clone(), state.inner().clone());
     let status = state.status();
     let _ = app.emit_all("demo_monitor_status", status.clone());
@@ -432,86 +749,52 @@ fn demo_get_status(state: State<'_, Arc<AppState>>) -> Result<DemoMonitorStatus,
 }
 
 #[tauri::command]
-fn demo_reset(state: State<'_, Arc<AppState>>) -> Result<DemoMonitorStatus, String> {
-    if let Ok(mut guard) = state.last_error.lock() {
-        *guard = None;
-    }
-    Ok(state.status())
+fn demo_save_video(request: DemoVideoSaveRequest) -> Result<DemoVideoSaveResult, String> {
+    let base_name = sanitize_base_name(&request.suggested_base_name);
+    let video_extension = sanitize_extension(&request.video_extension);
+    let video_file_name = format!("{base_name}.{video_extension}");
+
+    let Some(video_path) =
+        select_save_path("Save Demo Recorder Video", &video_file_name, video_extension)?
+    else {
+        return Ok(DemoVideoSaveResult {
+            canceled: true,
+            video_path: None,
+        });
+    };
+
+    let bytes = decode_video_bytes(&request.video_bytes_base64)?;
+    ensure_parent_dir(&video_path, "video")?;
+    fs::write(&video_path, bytes).map_err(|error| format!("Could not save the demo video: {error}"))?;
+
+    Ok(DemoVideoSaveResult {
+        canceled: false,
+        video_path: Some(video_path.to_string_lossy().to_string()),
+    })
 }
 
 #[tauri::command]
-fn recorder_start_sources() -> Result<(), String> {
-    Err(
-        "Desktop native capture pipeline is not wired yet. Use renderer capture path for now."
-            .to_string(),
-    )
-}
-
-#[tauri::command]
-fn recorder_stop_sources() -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-fn recorder_replace_screen_source() -> Result<(), String> {
-    Err("Replace screen source via native backend is pending.".to_string())
-}
-
-#[tauri::command]
-fn recorder_start_recording() -> Result<(), String> {
-    Err(
-        "Desktop native recording pipeline is not wired yet. Use renderer recording path for now."
-            .to_string(),
-    )
-}
-
-#[tauri::command]
-fn recorder_stop_recording() -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-fn demo_export_media(request: DemoExportRequest) -> Result<DemoExportResult, String> {
+fn demo_export_gif(request: DemoGifExportRequest) -> Result<DemoGifExportResult, String> {
     let clip_duration_ms = request.gif_end_ms.saturating_sub(request.gif_start_ms);
     if clip_duration_ms == 0 {
         return Err("Trim end must be after trim start.".to_string());
     }
 
     let base_name = sanitize_base_name(&request.suggested_base_name);
-    let video_extension = sanitize_extension(&request.video_extension);
-    let video_file_name = format!("{base_name}.{video_extension}");
     let gif_file_name = format!("{base_name}.gif");
+    let video_extension = sanitize_extension(&request.video_extension);
 
-    let Some(video_path) = select_save_path("Save Demo Maker Video", &video_file_name, video_extension)? else {
-        return Ok(DemoExportResult {
+    let Some(gif_path) = select_save_path("Export Demo Recorder GIF", &gif_file_name, "gif")? else {
+        return Ok(DemoGifExportResult {
             canceled: true,
-            video_path: None,
             gif_path: None,
-            gif_error: None,
         });
     };
 
-    let Some(gif_path) = select_save_path("Save Demo Maker GIF", &gif_file_name, "gif")? else {
-        return Ok(DemoExportResult {
-            canceled: true,
-            video_path: None,
-            gif_path: None,
-            gif_error: None,
-        });
-    };
+    ensure_parent_dir(&gif_path, "GIF")?;
 
-    let bytes = BASE64_STANDARD
-        .decode(request.video_bytes_base64.as_bytes())
-        .map_err(|error| format!("Could not decode recorded video bytes: {error}"))?;
-
-    if let Some(parent) = video_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("Could not create video folder: {error}"))?;
-    }
-    if let Some(parent) = gif_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("Could not create GIF folder: {error}"))?;
-    }
-
-    fs::write(&video_path, bytes).map_err(|error| format!("Could not save demo video: {error}"))?;
+    let bytes = decode_video_bytes(&request.video_bytes_base64)?;
+    let temp_video_path = write_temp_video_file(&bytes, video_extension)?;
 
     let ffmpeg_path = resolve_ffmpeg_path();
     let start_seconds = format!("{:.3}", request.gif_start_ms as f64 / 1000.0);
@@ -525,29 +808,26 @@ fn demo_export_media(request: DemoExportRequest) -> Result<DemoExportResult, Str
         .arg("-t")
         .arg(duration_seconds)
         .arg("-i")
-        .arg(&video_path)
+        .arg(&temp_video_path)
         .arg("-vf")
         .arg(gif_filter)
         .arg("-loop")
         .arg("0")
         .arg(&gif_path)
-        .output()
+        .output();
+
+    let _ = fs::remove_file(&temp_video_path);
+
+    let output = output
         .map_err(|error| format!("Could not start FFmpeg at '{}': {error}", ffmpeg_path.display()))?;
 
     if !output.status.success() {
-        return Ok(DemoExportResult {
-            canceled: false,
-            video_path: Some(video_path.to_string_lossy().to_string()),
-            gif_path: None,
-            gif_error: Some(format_ffmpeg_error(&output.stderr)),
-        });
+        return Err(format_ffmpeg_error(&output.stderr));
     }
 
-    Ok(DemoExportResult {
+    Ok(DemoGifExportResult {
         canceled: false,
-        video_path: Some(video_path.to_string_lossy().to_string()),
         gif_path: Some(gif_path.to_string_lossy().to_string()),
-        gif_error: None,
     })
 }
 
@@ -557,18 +837,28 @@ fn main() {
             last_typing_emit: Mutex::new(Instant::now()),
             ..Default::default()
         }))
+        .setup(|app| {
+            let state: State<'_, Arc<AppState>> = app.state();
+            let accessibility_granted = request_accessibility_permission(true);
+            let input_granted = request_input_monitoring_access(true);
+            if !accessibility_granted || !input_granted {
+                if let Ok(mut guard) = state.last_error.lock() {
+                    *guard = Some(
+                        "macOS should show Input Monitoring and Accessibility prompts for auto focus. After allowing them, restart the app."
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             demo_set_enabled,
             demo_set_config,
             demo_get_status,
-            demo_reset,
-            recorder_start_sources,
-            recorder_stop_sources,
-            recorder_replace_screen_source,
-            recorder_start_recording,
-            recorder_stop_recording,
-            demo_export_media
+            demo_save_video,
+            demo_export_gif,
+            demo_open_accessibility_settings
         ])
         .run(tauri::generate_context!())
-        .expect("error while running frameforge desktop");
+        .expect("error while running demo recorder");
 }

@@ -1,47 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  advanceFreezeWatch,
-  deriveControlState,
-  getBaseScreenRect,
-  getScreenRenderMode,
-} from "../src/recorder-utils.mjs";
-
-test("deriveControlState locks source controls while recording", () => {
-  const state = deriveControlState({
-    hasScreen: true,
-    hasWebcam: true,
-    hasAnySource: true,
-    recording: true,
-  });
-
-  assert.equal(state.startSourcesDisabled, true);
-  assert.equal(state.stopSourcesDisabled, true);
-  assert.equal(state.replaceScreenDisabled, false);
-  assert.equal(state.startRecordDisabled, true);
-  assert.equal(state.stopRecordDisabled, false);
-  assert.equal(state.resolutionDisabled, true);
-  assert.equal(state.fpsDisabled, true);
-  assert.equal(state.formatDisabled, true);
-});
-
-test("deriveControlState enables start recording only when both screen and webcam exist", () => {
-  const missingWebcam = deriveControlState({
-    hasScreen: true,
-    hasWebcam: false,
-    hasAnySource: true,
-    recording: false,
-  });
-  assert.equal(missingWebcam.startRecordDisabled, true);
-
-  const ready = deriveControlState({
-    hasScreen: true,
-    hasWebcam: true,
-    hasAnySource: true,
-    recording: false,
-  });
-  assert.equal(ready.startRecordDisabled, false);
-});
+import { advanceFreezeWatch, getBaseScreenRect, getScreenRenderMode } from "../src/recorder-utils.mjs";
 
 test("getBaseScreenRect returns stretch rectangle", () => {
   const rect = getBaseScreenRect(1920, 1080, 1280, 720, "stretch");

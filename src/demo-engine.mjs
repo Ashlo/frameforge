@@ -1,5 +1,5 @@
 const MIN_ZOOM_STRENGTH = 0.05;
-const MAX_ZOOM_STRENGTH = 0.9;
+const MAX_ZOOM_STRENGTH = 0.95;
 
 const MIN_DURATION_MS = 200;
 const MAX_DURATION_MS = 4000;
@@ -8,26 +8,26 @@ const MAX_COOLDOWN_MS = 5000;
 const MIN_TYPING_HOLD_MS = 200;
 const MAX_TYPING_HOLD_MS = 5000;
 
-export const DEFAULT_DEMO_PRESET = "subtle";
+export const DEFAULT_DEMO_PRESET = "balanced";
 
 export const DEMO_PRESETS = {
   subtle: {
-    zoomStrength: 0.24,
-    zoomDurationMs: 700,
-    cooldownMs: 650,
-    typingHoldMs: 1200,
+    zoomStrength: 0.36,
+    zoomDurationMs: 860,
+    cooldownMs: 420,
+    typingHoldMs: 1180,
   },
   balanced: {
-    zoomStrength: 0.36,
-    zoomDurationMs: 820,
-    cooldownMs: 540,
-    typingHoldMs: 1150,
+    zoomStrength: 0.56,
+    zoomDurationMs: 980,
+    cooldownMs: 320,
+    typingHoldMs: 1280,
   },
   intense: {
-    zoomStrength: 0.52,
-    zoomDurationMs: 980,
-    cooldownMs: 420,
-    typingHoldMs: 1000,
+    zoomStrength: 0.78,
+    zoomDurationMs: 1120,
+    cooldownMs: 220,
+    typingHoldMs: 1450,
   },
 };
 
@@ -59,6 +59,10 @@ function clampUnit(value, fallback = 0.5) {
   return clampNumber(toFiniteNumber(value, fallback), 0, 1);
 }
 
+function clampFocusWithMargin(value, margin, fallback = 0.5) {
+  return clampNumber(toFiniteNumber(value, fallback), margin, 1 - margin);
+}
+
 function clampDemoSettingBounds(settings) {
   return {
     zoomStrength: clampNumber(toFiniteNumber(settings.zoomStrength, 0.24), MIN_ZOOM_STRENGTH, MAX_ZOOM_STRENGTH),
@@ -73,6 +77,30 @@ function clampDemoSettingBounds(settings) {
       MIN_TYPING_HOLD_MS,
       MAX_TYPING_HOLD_MS
     ),
+  };
+}
+
+function resolveFocusMargin(zoomStrength) {
+  return clampNumber(0.08 + zoomStrength * 0.13, 0.12, 0.22);
+}
+
+function resolveEventIntensity(event) {
+  const fallback = event?.kind === "click" ? 0.55 : 0.72;
+  return clampNumber(toFiniteNumber(event?.intensity, fallback), 0, 1);
+}
+
+function resolveTargetStrength(event, settings) {
+  const intensity = resolveEventIntensity(event);
+  const multiplier =
+    event?.kind === "type" ? lerp(0.72, 0.96, intensity) : lerp(1.05, 1.18, intensity);
+
+  return clampNumber(settings.zoomStrength * multiplier, MIN_ZOOM_STRENGTH, MAX_ZOOM_STRENGTH);
+}
+
+function resolveCurrentFocus(zoom) {
+  return {
+    x: clampUnit(zoom?.focusNormX, 0.5),
+    y: clampUnit(zoom?.focusNormY, 0.5),
   };
 }
 
@@ -113,23 +141,22 @@ export function enqueueDemoEvent(queue, event, { maxQueue = 80 } = {}) {
 export function beginDemoZoom(previousZoom, event, rawSettings, nowMs) {
   const zoom = previousZoom || {};
   const settings = clampDemoSettingBounds(rawSettings || {});
-  const intensity = clampNumber(toFiniteNumber(event?.intensity, 0), 0, 1);
+  const targetStrength = resolveTargetStrength(event, settings);
+  const scaleTarget = 1 + targetStrength;
 
-  const targetStrength =
-    event?.kind === "type"
-      ? settings.zoomStrength + settings.zoomStrength * 0.35 * intensity
-      : settings.zoomStrength;
-  const scaleTarget = 1 + clampNumber(targetStrength, MIN_ZOOM_STRENGTH, MAX_ZOOM_STRENGTH);
-
-  const zoomInMs = Math.max(140, Math.round(settings.zoomDurationMs * 0.42));
-  const zoomOutMs = Math.max(180, settings.zoomDurationMs - zoomInMs);
+  const zoomInMs = Math.max(180, Math.round(settings.zoomDurationMs * 0.46));
+  const zoomOutMs = Math.max(260, settings.zoomDurationMs - zoomInMs);
   const holdMs =
-    event?.kind === "type" ? settings.typingHoldMs : Math.max(140, Math.round(settings.zoomDurationMs * 0.24));
+    event?.kind === "type" ? settings.typingHoldMs : Math.max(220, Math.round(settings.zoomDurationMs * 0.34));
 
   const startedAt = toFiniteNumber(nowMs, performance.now());
   const zoomInEndsAt = startedAt + zoomInMs;
   const holdEndsAt = zoomInEndsAt + holdMs;
   const zoomOutEndsAt = holdEndsAt + zoomOutMs;
+  const focusStart = resolveCurrentFocus(zoom);
+  const focusMargin = resolveFocusMargin(targetStrength);
+  const focusTargetX = clampFocusWithMargin(event?.xNorm, focusMargin, focusStart.x);
+  const focusTargetY = clampFocusWithMargin(event?.yNorm, focusMargin, focusStart.y);
 
   return {
     active: true,
@@ -141,8 +168,12 @@ export function beginDemoZoom(previousZoom, event, rawSettings, nowMs) {
     cooldownUntil: zoom.cooldownUntil || 0,
     scaleCurrent: 1,
     scaleTarget,
-    focusNormX: clampUnit(event?.xNorm, zoom.focusNormX ?? 0.5),
-    focusNormY: clampUnit(event?.yNorm, zoom.focusNormY ?? 0.5),
+    focusNormX: focusStart.x,
+    focusNormY: focusStart.y,
+    focusStartX: focusStart.x,
+    focusStartY: focusStart.y,
+    focusTargetX,
+    focusTargetY,
     kind: event?.kind || "click",
   };
 }
@@ -157,11 +188,17 @@ export function stepDemoZoom(currentZoom, rawSettings, nowMs) {
       ...zoom,
       stage: "idle",
       scaleCurrent: 1,
+      focusNormX: clampUnit(zoom.focusNormX, 0.5),
+      focusNormY: clampUnit(zoom.focusNormY, 0.5),
     };
   }
 
   const fromScale = 1;
   const toScale = clampNumber(toFiniteNumber(zoom.scaleTarget, 1.24), 1 + MIN_ZOOM_STRENGTH, 1 + MAX_ZOOM_STRENGTH);
+  const focusStartX = clampUnit(zoom.focusStartX, zoom.focusNormX ?? 0.5);
+  const focusStartY = clampUnit(zoom.focusStartY, zoom.focusNormY ?? 0.5);
+  const focusTargetX = clampUnit(zoom.focusTargetX, focusStartX);
+  const focusTargetY = clampUnit(zoom.focusTargetY, focusStartY);
 
   if (now <= zoom.zoomInEndsAt) {
     const progress = clampNumber(
@@ -169,10 +206,13 @@ export function stepDemoZoom(currentZoom, rawSettings, nowMs) {
       0,
       1
     );
+    const easedProgress = easeOutCubic(progress);
     return {
       ...zoom,
       stage: "zoom-in",
-      scaleCurrent: lerp(fromScale, toScale, easeOutCubic(progress)),
+      scaleCurrent: lerp(fromScale, toScale, easedProgress),
+      focusNormX: lerp(focusStartX, focusTargetX, easedProgress),
+      focusNormY: lerp(focusStartY, focusTargetY, easedProgress),
     };
   }
 
@@ -181,6 +221,8 @@ export function stepDemoZoom(currentZoom, rawSettings, nowMs) {
       ...zoom,
       stage: "hold",
       scaleCurrent: toScale,
+      focusNormX: focusTargetX,
+      focusNormY: focusTargetY,
     };
   }
 
@@ -190,6 +232,8 @@ export function stepDemoZoom(currentZoom, rawSettings, nowMs) {
       ...zoom,
       stage: "zoom-out",
       scaleCurrent: lerp(toScale, fromScale, easeInOutCubic(progress)),
+      focusNormX: focusTargetX,
+      focusNormY: focusTargetY,
     };
   }
 
@@ -205,7 +249,7 @@ export function stepDemoZoom(currentZoom, rawSettings, nowMs) {
 export function getDemoScreenEffect(zoom) {
   const safeZoom = zoom || {};
   return {
-    scale: clampNumber(toFiniteNumber(safeZoom.scaleCurrent, 1), 1, 2),
+    scale: clampNumber(toFiniteNumber(safeZoom.scaleCurrent, 1), 1, 2.1),
     focusNormX: clampUnit(safeZoom.focusNormX, 0.5),
     focusNormY: clampUnit(safeZoom.focusNormY, 0.5),
   };

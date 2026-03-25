@@ -1,7 +1,7 @@
 function getTauriApi() {
   const tauri = window.__TAURI__;
   if (!tauri?.invoke || !tauri?.event?.listen) {
-    throw new Error("Desktop bridge unavailable. Start Frameforge inside the Tauri desktop app.");
+    throw new Error("Desktop bridge unavailable. Start Demo Recorder inside the Tauri desktop app.");
   }
   return tauri;
 }
@@ -74,6 +74,14 @@ export function createDesktopDemoBridge({ onStatus, onEvent, onError } = {}) {
   };
 }
 
-export async function exportDemoMedia(request) {
-  return getTauriApi().invoke("demo_export_media", { request });
+export async function saveDemoVideo(request) {
+  return getTauriApi().invoke("demo_save_video", { request });
+}
+
+export async function exportDemoGif(request) {
+  return getTauriApi().invoke("demo_export_gif", { request });
+}
+
+export async function openAccessibilitySettings() {
+  return getTauriApi().invoke("demo_open_accessibility_settings");
 }

@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/1",
   "build": {
-    "beforeDevCommand": "npm --prefix .. run dev -- -p 1420",
+    "beforeDevCommand": "npm --prefix .. run dev",
     "beforeBuildCommand": "npm --prefix .. run build",
-    "devPath": "http://localhost:1420",
-    "distDir": "../.next"
+    "devPath": "http://127.0.0.1:1420",
+    "distDir": "../../dist"
   },
   "package": {
-    "productName": "Frameforge Desktop",
+    "productName": "Frameforge Demo Recorder",
     "version": "0.1.0"
   },
   "tauri": {
@@ -19,9 +19,9 @@
       }
     },
     "bundle": {
-      "active": false,
+      "active": true,
       "identifier": "com.frameforge.desktop",
-      "targets": "all",
+      "targets": ["app"],
       "macOS": {
         "minimumSystemVersion": "12.0"
       }
@@ -31,10 +31,10 @@
     },
     "windows": [
       {
-        "title": "Frameforge Desktop",
-        "width": 1680,
-        "height": 980,
-        "minWidth": 1240,
+        "title": "Frameforge Demo Recorder",
+        "width": 1560,
+        "height": 960,
+        "minWidth": 1180,
         "minHeight": 760,
         "resizable": true
       }
